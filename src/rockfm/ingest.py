@@ -153,6 +153,10 @@ class Ingestor:
         relpaths = db.delete_segments_before(self.conn, cutoff)
         for relpath in relpaths:
             (self.config.segments_dir / relpath).unlink(missing_ok=True)
+        # Timeline rows describe audio that no longer exists, so they go with it.
+        # Fingerprints deliberately do not: the whole point of learning a song is
+        # that it stays known after the recording is gone.
+        db.delete_timeline_before(self.conn, cutoff)
         self._remove_empty_dirs()
         if relpaths:
             log.info("pruned %d segments older than %d h", len(relpaths), self.config.buffer_hours)

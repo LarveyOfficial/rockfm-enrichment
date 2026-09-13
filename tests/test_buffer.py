@@ -61,3 +61,35 @@ def test_gap_detection(tmp_path):
     reader = BufferReader(conn, config)
     assert reader.has_gap(999_000, 1_100_000)
     assert not reader.has_gap(2_000_000, 2_100_000)
+
+
+def test_pruning_drops_segments_and_their_timeline_but_keeps_fingerprints(tmp_path):
+    """Learned fingerprints must outlive the audio they came from."""
+    from rockfm.fingerprint import FingerprintIndex
+    from rockfm.ingest import Ingestor
+
+    config = Config(data_dir=tmp_path, buffer_hours=1)
+    config.ensure_dirs()
+    database = db.ThreadLocalDB(config.db_path)
+    conn = database.conn
+
+    now_ms = int(__import__("time").time() * 1000)
+    old, recent = now_ms - 3 * 3600 * 1000, now_ms - 60_000
+    for pdt, name in ((old, "old.aac"), (recent, "new.aac")):
+        target = config.segments_dir / name
+        target.write_bytes(b"x")
+        db.insert_segment(
+            conn, pdt_ms=pdt, seq=0, duration_ms=6000, relpath=name, size=1, fetched_ms=0
+        )
+    db.upsert_timeline(conn, {"start_ms": old, "end_ms": old + 6000, "kind": "cancion"}, 0)
+    db.upsert_timeline(conn, {"start_ms": recent, "end_ms": recent + 6000, "kind": "cancion"}, 0)
+    FingerprintIndex(conn).add(kind="music", key="a|b", hashes=[(1, 0), (2, 1)], title="b")
+
+    removed = Ingestor(config, database).prune()
+
+    assert removed == 1
+    assert not (config.segments_dir / "old.aac").exists()
+    assert (config.segments_dir / "new.aac").exists()
+    assert db.segment_count(conn) == 1
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM fp_hashes").fetchone()[0] == 2

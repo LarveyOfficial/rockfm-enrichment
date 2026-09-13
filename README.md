@@ -61,6 +61,13 @@ never cuts a song in half.
 docker compose up -d --build
 ```
 
+Building with podman instead needs `--format docker`, otherwise the image is
+written in OCI format and the `HEALTHCHECK` is silently dropped:
+
+```bash
+podman build --format docker -t rockfm-enrichment:latest .
+```
+
 Then point a player at `http://<host>:8080/hls/playlist.m3u8`, or open
 `http://<host>:8080/` for a small web player. On Unraid, use
 `unraid-template.xml`.
@@ -140,3 +147,6 @@ supported API.
   the first day to under-report adverts.
 - The classifier has been exercised against music and idents; a validation run
   across a daytime block with real advert breaks is still outstanding.
+- The speech/music CNN makes the image large. Build with
+  `--build-arg INCLUDE_SEGMENTER=false` and set `SEGMENTER=light` for a much
+  smaller image, at the cost of the classifier abstaining more often.

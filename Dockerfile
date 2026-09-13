@@ -27,15 +27,22 @@ RUN pip install --no-cache-dir . \
 # It can be left out for a constrained host -- set SEGMENTER=light to match, and
 # expect the classifier to abstain more often.
 #
-# tensorflow-cpu and onnxruntime go in FIRST on purpose. Installing
-# inaSpeechSegmenter on its own resolves to the GPU builds and drags in the
-# whole CUDA stack -- cuDNN, cuBLAS, NCCL, nvcc -- which is several gigabytes of
-# wheels that will never be used on a headless server.
+# inaSpeechSegmenter names `tensorflow` and `onnxruntime-gpu` as requirements,
+# so pip installs the GPU builds and the entire CUDA stack behind them -- cuDNN,
+# cuBLAS, NCCL, nvcc -- taking the image past 8 GB for hardware a headless Unraid
+# box does not have. Installing tensorflow-cpu first does not help: it is a
+# different distribution name, so pip pulls `tensorflow` anyway.
+#
+# So the segmenter goes in with --no-deps and its requirements are listed here
+# explicitly, with the CPU builds substituted. The import check below is what
+# guards against this list drifting out of date.
 RUN if [ "$INCLUDE_SEGMENTER" = "true" ]; then \
       pip install --no-cache-dir "tensorflow-cpu>=2.16" onnxruntime \
-      && pip install --no-cache-dir inaSpeechSegmenter \
-      && python -c "from inaSpeechSegmenter import Segmenter; Segmenter(vad_engine='smn', detect_gender=False)" \
-      && python -c "import tensorflow; print('tensorflow', tensorflow.__version__)" ; \
+      && pip install --no-cache-dir --no-deps inaSpeechSegmenter pyannote.core \
+      && pip install --no-cache-dir \
+           pandas scikit-image soundfile matplotlib Pyro4 pytextgrid sortedcontainers \
+      && python -c "import tensorflow; print('tensorflow', tensorflow.__version__)" \
+      && python -c "from inaSpeechSegmenter import Segmenter; Segmenter(vad_engine='smn', detect_gender=False); print('segmenter ok')" ; \
     fi
 
 COPY docker ./docker

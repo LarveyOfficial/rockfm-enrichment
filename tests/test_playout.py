@@ -57,3 +57,9 @@ def test_master_playlist_points_at_the_media_playlist(client):
 
 def test_player_page_renders(client):
     assert "RockFM" in client.get("/").text
+
+
+def test_nowplaying_reports_the_source_timezone(client):
+    payload = client.get("/api/nowplaying").json()
+    assert payload["source_timezone"] == "Europe/Madrid"
+    assert payload["source_time"].endswith(("+02:00", "+01:00"))

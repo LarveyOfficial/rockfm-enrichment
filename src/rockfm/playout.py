@@ -163,6 +163,7 @@ class Playout:
             "delay_hours": round(self.delay.current / 3600, 2),
             "pending_delay_seconds": self.delay.pending.delay if self.delay.pending else None,
             "source_time": source_wallclock(self.config, now).isoformat(),
+            "source_timezone": self.config.source_tz_name,
             "playout_time": _iso(position),
             "now_playing": self._describe(current, position),
             "next": self._describe(upcoming, position) if upcoming else None,
@@ -286,27 +287,33 @@ def create_app(config: Config | None = None) -> FastAPI:
 PLAYER_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RockFM · diferido</title>
+<title>RockFM · en diferido</title>
 <style>
-:root{color-scheme:dark;--bg:#0d0d10;--fg:#f2f2f5;--dim:#9a9aa5;--accent:#e03131}
+:root{color-scheme:dark;--bg:#0c0c0f;--fg:#f4f4f7;--dim:#8e8e99;--line:#23232b;--accent:#e03131}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;
-display:grid;place-items:center;min-height:100vh;padding:24px}
-.card{width:min(420px,100%);text-align:center}
-img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:#1a1a20}
-h1{font-size:1.25rem;margin:18px 0 4px}
-p{margin:0;color:var(--dim);font-size:.95rem}
-.bar{height:4px;background:#26262e;border-radius:2px;margin:18px 0 6px;overflow:hidden}
-.bar span{display:block;height:100%;background:var(--accent);width:0;transition:width .5s linear}
-.row{display:flex;justify-content:space-between;font-size:.8rem;color:var(--dim)}
-button{margin-top:18px;padding:10px 22px;border:0;border-radius:999px;background:var(--accent);
-color:#fff;font-size:1rem;cursor:pointer}
-.meta{margin-top:14px;font-size:.75rem;color:var(--dim)}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  display:grid;place-items:center;min-height:100vh;padding:24px}
+.card{width:min(400px,100%);text-align:center}
+.artwrap{position:relative;border-radius:14px;overflow:hidden;background:#17171d;aspect-ratio:1}
+img{width:100%;height:100%;object-fit:cover;display:block}
+.kind{position:absolute;top:10px;left:10px;padding:3px 10px;border-radius:999px;
+  background:rgba(0,0,0,.6);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase}
+h1{font-size:1.2rem;margin:16px 0 2px;line-height:1.3}
+p.sub{margin:0;color:var(--dim);font-size:.92rem}
+.bar{height:4px;background:var(--line);border-radius:2px;margin:16px 0 6px;overflow:hidden}
+.bar span{display:block;height:100%;background:var(--accent);width:0;transition:width .6s linear}
+.row{display:flex;justify-content:space-between;font-size:.76rem;color:var(--dim);
+  font-variant-numeric:tabular-nums}
+button{margin-top:18px;padding:11px 26px;border:0;border-radius:999px;background:var(--accent);
+  color:#fff;font-size:1rem;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.meta{margin-top:14px;font-size:.72rem;color:var(--dim)}
 </style></head><body>
 <div class="card">
-  <img id="art" alt="">
+  <div class="artwrap"><img id="art" alt=""><span class="kind" id="kind"></span></div>
   <h1 id="primary">RockFM</h1>
-  <p id="secondary"></p>
+  <p class="sub" id="secondary"></p>
   <div class="bar"><span id="fill"></span></div>
   <div class="row"><span id="elapsed">--:--</span><span id="duration">--:--</span></div>
   <button id="play">Escuchar</button>
@@ -314,31 +321,65 @@ color:#fff;font-size:1rem;cursor:pointer}
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
 <script>
+const SRC = '/hls/playlist.m3u8';
 const audio = new Audio();
-const src = '/hls/playlist.m3u8';
-document.getElementById('play').onclick = () => {
-  if (audio.src || window.Hls?.isSupported()) { audio.play(); return; }
-};
-if (window.Hls && Hls.isSupported()) { const h = new Hls(); h.loadSource(src); h.attachMedia(audio); }
-else { audio.src = src; }
-document.getElementById('play').addEventListener('click', () => audio.play());
-const fmt = s => s == null ? '--:--' : `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
-async function tick() {
-  try {
-    const r = await fetch('/api/nowplaying'); const d = await r.json(); const n = d.now_playing;
-    document.getElementById('primary').textContent = n.primary || 'RockFM';
-    document.getElementById('secondary').textContent = n.secondary || '';
-    const art = document.getElementById('art');
-    if (n.art && art.src !== n.art) art.src = n.art;
-    document.getElementById('elapsed').textContent = fmt(n.elapsed);
-    document.getElementById('duration').textContent = fmt(n.duration);
-    document.getElementById('fill').style.width =
-      (n.duration ? Math.min(100, 100 * n.elapsed / n.duration) : 0) + '%';
-    document.getElementById('meta').textContent =
-      `Diferido ${d.delay_hours} h · hora en España ${new Date(d.source_time).toLocaleTimeString('es-ES')}`;
-  } catch (e) {}
+audio.preload = 'none';
+const btn = document.getElementById('play');
+let attached = false;
+
+function attach() {
+  if (attached) return;
+  attached = true;
+  if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({ liveSyncDurationCount: 3 });
+    hls.loadSource(SRC);
+    hls.attachMedia(audio);
+  } else {
+    audio.src = SRC;   // Safari and iOS play HLS natively
+  }
 }
-tick(); setInterval(tick, 3000);
+
+btn.addEventListener('click', () => {
+  attach();
+  if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+});
+audio.addEventListener('play',  () => { btn.textContent = 'Pausar'; });
+audio.addEventListener('pause', () => { btn.textContent = 'Escuchar'; });
+
+const mmss = s => s == null ? '--:--'
+  : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+const set = (id, text) => {
+  const el = document.getElementById(id);
+  if (el.textContent !== text) el.textContent = text;
+};
+
+async function refresh() {
+  try {
+    const data = await (await fetch('/api/nowplaying', { cache: 'no-store' })).json();
+    const np = data.now_playing;
+    set('primary', np.primary || 'RockFM');
+    set('secondary', np.secondary || '');
+    set('kind', np.kind === 'cancion' ? '' : (np.kind || ''));
+    const art = document.getElementById('art');
+    const wanted = np.art || '';
+    if (art.getAttribute('src') !== wanted) art.setAttribute('src', wanted);
+    set('elapsed', mmss(np.elapsed));
+    set('duration', mmss(np.duration));
+    document.getElementById('fill').style.width =
+      (np.duration ? Math.min(100, 100 * np.elapsed / np.duration) : 0) + '%';
+    // source_time is a Madrid wall clock. Without an explicit timeZone the
+    // browser would helpfully re-render it in the viewer's own zone, which is
+    // precisely the thing this line exists to tell them.
+    const madrid = new Date(data.source_time).toLocaleTimeString('es-ES', {
+      hour: '2-digit', minute: '2-digit', timeZone: data.source_timezone || 'Europe/Madrid',
+    });
+    set('meta', `Diferido ${data.delay_hours} h · en España son las ${madrid}`);
+  } catch (err) {
+    set('meta', 'sin conexión con el servidor');
+  }
+}
+refresh();
+setInterval(refresh, 3000);
 </script></body></html>
 """
 

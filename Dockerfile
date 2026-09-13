@@ -24,11 +24,18 @@ RUN pip install --no-cache-dir . \
  && pip install --no-cache-dir "numpy>=1.26" "scipy>=1.12" shazamio
 
 # The speech/music CNN is what separates a DJ talking from an unrecognised song.
-# It drags in TensorFlow (~1GB), so it can be left out for a constrained host --
-# set SEGMENTER=light to match, and expect the classifier to abstain more often.
+# It can be left out for a constrained host -- set SEGMENTER=light to match, and
+# expect the classifier to abstain more often.
+#
+# tensorflow-cpu and onnxruntime go in FIRST on purpose. Installing
+# inaSpeechSegmenter on its own resolves to the GPU builds and drags in the
+# whole CUDA stack -- cuDNN, cuBLAS, NCCL, nvcc -- which is several gigabytes of
+# wheels that will never be used on a headless server.
 RUN if [ "$INCLUDE_SEGMENTER" = "true" ]; then \
-      pip install --no-cache-dir inaSpeechSegmenter \
-      && python -c "from inaSpeechSegmenter import Segmenter; Segmenter(vad_engine='smn', detect_gender=False)" ; \
+      pip install --no-cache-dir "tensorflow-cpu>=2.16" onnxruntime \
+      && pip install --no-cache-dir inaSpeechSegmenter \
+      && python -c "from inaSpeechSegmenter import Segmenter; Segmenter(vad_engine='smn', detect_gender=False)" \
+      && python -c "import tensorflow; print('tensorflow', tensorflow.__version__)" ; \
     fi
 
 COPY docker ./docker

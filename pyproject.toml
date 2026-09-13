@@ -1,0 +1,26 @@
+[project]
+name = "rockfm-enrichment"
+version = "0.1.0"
+description = "Time-shifted, metadata-enriched RockFM (Spain) stream for AzuraCast"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+recognize = ["numpy>=1.26", "scipy>=1.12", "shazamio>=0.7"]
+classify = ["inaSpeechSegmenter>=0.8"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "time-machine>=2.14"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

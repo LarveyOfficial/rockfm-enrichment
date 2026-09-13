@@ -20,8 +20,9 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from rockfm import db, ingest  # noqa: E402
+from rockfm import db, ingest, labels  # noqa: E402
 from rockfm.analyzer import Analyzer  # noqa: E402
+from rockfm.classify.decide import Classifier  # noqa: E402
 from rockfm.config import Config  # noqa: E402
 
 MADRID = ZoneInfo("Europe/Madrid")
@@ -32,6 +33,7 @@ def main() -> None:
     parser.add_argument("--seconds", type=int, default=600)
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--skip-record", action="store_true")
+    parser.add_argument("--no-classify", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s: %(message)s")
@@ -58,24 +60,26 @@ def main() -> None:
         pass
     elapsed = time.time() - started
 
+    classified = 0
+    if not args.no_classify:
+        print("classifying non-song stretches ...\n", flush=True)
+        classifier = Classifier(config, conn)
+        classified = classifier.run_once()
+
     rows = list(conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
-    print(f"\n{'MADRID':<10} {'DUR':>7}  {'KIND':<12} {'SOURCE':<10} WHAT")
-    print("-" * 92)
+    print(f"\n{'MADRID':<10} {'DUR':>7}  {'KIND':<12}  WHAT IS SHOWN")
+    print("-" * 96)
     for row in rows:
         clock = datetime.fromtimestamp(row["start_ms"] / 1000, tz=timezone.utc).astimezone(MADRID)
-        what = (
-            f"{row['artist']} - {row['title']}"
-            + (f"  [{row['album']}{', ' + str(row['year']) if row['year'] else ''}]" if row["album"] else "")
-            if row["artist"]
-            else "-"
-        )
+        primary, secondary = labels.render(dict(row))
+        shown = primary + (f"   ·   {secondary}" if secondary else "")
         print(
             f"{clock:%H:%M:%S}  {(row['end_ms'] - row['start_ms']) / 1000:6.1f}s  "
-            f"{row['kind']:<12} {row['source']:<10} {what}"
+            f"{row['kind']:<12}  {shown}"
         )
     songs = [r for r in rows if r["kind"] == "cancion"]
     print(
-        f"\n{len(rows)} items ({len(songs)} songs) | "
+        f"\n{len(rows)} items ({len(songs)} songs, {classified} stretches classified) | "
         f"{analyzer.external_calls} external recogniser calls | analysis took {elapsed:.0f}s"
     )
 

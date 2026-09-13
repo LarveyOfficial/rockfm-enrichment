@@ -1,0 +1,23 @@
+services:
+  rockfm:
+    build: .
+    container_name: rockfm-enrichment
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      LOCAL_TZ: America/New_York
+      BUFFER_HOURS: "24"
+      RECOGNIZER: shazamio
+      SEGMENTER: ina
+      DISPLAY_LANGUAGE: es
+      # Point this at how listeners reach the container, so artwork URLs
+      # handed to AzuraCast are absolute.
+      # PUBLIC_URL: http://unraid.local:8080
+      # AZURACAST_BASE_URL: https://azuracast.example.com
+      # AZURACAST_STATION_ID: "1"
+      # AZURACAST_API_KEY: ""
+      # AZURACAST_DJ_URL: azuracast.example.com:8005/
+      # AZURACAST_DJ_PASSWORD: ""

@@ -39,6 +39,16 @@ JUNK_MARKERS = (
     "8-bit", "8 bit", "workout mix", "in the style of", "originally performed",
 )
 
+# Real releases, but usually not where a track first appeared. Preferring the
+# earliest release otherwise lands on things like a 1978 live album for a song
+# the band did not record until 1984, so these rank below studio albums and only
+# win when nothing else matches.
+SECONDARY_MARKERS = (
+    "live", "en vivo", "en directo", "greatest hits", "best of", "the very best",
+    "collection", "anthology", "essential", "compilation", "soundtrack",
+    "now that's what i call", "remaster", "remastered", "deluxe", "edition",
+)
+
 
 @dataclass(frozen=True)
 class Enrichment:
@@ -61,15 +71,20 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, normalise(a), normalise(b)).ratio()
 
 
-def _is_junk(*fields: str | None) -> bool:
+def _matches(markers: tuple[str, ...], *fields: str | None) -> bool:
     haystack = " ".join(normalise(field) for field in fields)
-    return any(marker in haystack for marker in JUNK_MARKERS)
+    return any(marker in haystack for marker in markers)
+
+
+def _is_junk(*fields: str | None) -> bool:
+    return _matches(JUNK_MARKERS, *fields)
 
 
 @dataclass(frozen=True)
 class _Candidate:
     score: float
     junk: bool
+    secondary: bool
     year: int | None
     payload: dict
 
@@ -83,9 +98,10 @@ def _rank(
     """Pick the best release for artist/title.
 
     Artist and title must each clear their own threshold -- a great title match
-    with the wrong artist is a different recording. Among survivors, real
-    releases beat tribute/karaoke records, and the earliest release wins so we
-    land on the original album rather than a later compilation.
+    with the wrong artist is a different recording. Among survivors: genuine
+    releases beat tribute/karaoke records, studio albums beat live records and
+    compilations, and only then does the earliest release win, so we land on the
+    album a track first appeared on.
     """
     candidates: list[_Candidate] = []
     for item in items:
@@ -101,13 +117,16 @@ def _rank(
             _Candidate(
                 score=score,
                 junk=_is_junk(item_artist, item_title, album),
+                secondary=_matches(SECONDARY_MARKERS, item_title, album),
                 year=year,
                 payload=item,
             )
         )
     if not candidates:
         return None
-    candidates.sort(key=lambda c: (c.junk, -round(c.score, 3), c.year or 9999))
+    candidates.sort(
+        key=lambda c: (c.junk, c.secondary, -round(c.score, 3), c.year or 9999)
+    )
     return candidates[0].payload
 
 

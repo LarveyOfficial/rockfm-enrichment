@@ -78,6 +78,7 @@ class Config:
     azuracast_api_key: str = field(default_factory=lambda: _env("AZURACAST_API_KEY", ""))
     azuracast_dj_url: str = field(default_factory=lambda: _env("AZURACAST_DJ_URL", ""))
     azuracast_dj_password: str = field(default_factory=lambda: _env("AZURACAST_DJ_PASSWORD", ""))
+    azuracast_dj_codec: str = field(default_factory=lambda: _env("AZURACAST_DJ_CODEC", "mp3"))
 
     @property
     def source_tz(self) -> ZoneInfo:

@@ -93,3 +93,29 @@ def test_pruning_drops_segments_and_their_timeline_but_keeps_fingerprints(tmp_pa
     assert db.segment_count(conn) == 1
     assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM fp_hashes").fetchone()[0] == 2
+
+
+def test_timeline_upsert_replaces_overlapping_rows_atomically(tmp_path):
+    config = Config(data_dir=tmp_path)
+    config.ensure_dirs()
+    conn = db.connect(config.db_path)
+
+    db.upsert_timeline(conn, {"start_ms": 0, "end_ms": 10_000, "kind": "cancion"}, 0)
+    db.upsert_timeline(conn, {"start_ms": 10_000, "end_ms": 20_000, "kind": "publicidad"}, 0)
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 2
+
+    # A row straddling both replaces both, leaving exactly one.
+    db.upsert_timeline(conn, {"start_ms": 5_000, "end_ms": 15_000, "kind": "programa"}, 0)
+    rows = list(conn.execute("SELECT kind, start_ms, end_ms FROM timeline"))
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "programa"
+
+
+def test_abutting_timeline_rows_do_not_displace_each_other(tmp_path):
+    """Contiguous items share a boundary exactly; that must not count as overlap."""
+    config = Config(data_dir=tmp_path)
+    config.ensure_dirs()
+    conn = db.connect(config.db_path)
+    db.upsert_timeline(conn, {"start_ms": 0, "end_ms": 10_000, "kind": "cancion"}, 0)
+    db.upsert_timeline(conn, {"start_ms": 10_000, "end_ms": 20_000, "kind": "cancion"}, 0)
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 2

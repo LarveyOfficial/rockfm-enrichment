@@ -283,15 +283,21 @@ TIMELINE_COLUMNS = (
 
 
 def upsert_timeline(conn: sqlite3.Connection, item: dict, created_ms: int) -> None:
-    """Insert a timeline item, replacing anything already covering that span."""
-    conn.execute(
-        "DELETE FROM timeline WHERE start_ms < ? AND end_ms > ?",
-        (item["end_ms"], item["start_ms"]),
-    )
+    """Insert a timeline item, replacing anything already covering that span.
+
+    The analyzer and the classifier both write here, so the clear-then-insert
+    runs as one transaction; interleaved halves would leave a hole in the
+    timeline or two rows claiming the same moment.
+    """
     columns = ", ".join((*TIMELINE_COLUMNS, "created_ms"))
     placeholders = ", ".join("?" * (len(TIMELINE_COLUMNS) + 1))
     values = [item.get(name) for name in TIMELINE_COLUMNS] + [created_ms]
-    conn.execute(f"INSERT INTO timeline ({columns}) VALUES ({placeholders})", values)
+    with transaction(conn):
+        conn.execute(
+            "DELETE FROM timeline WHERE start_ms < ? AND end_ms > ?",
+            (item["end_ms"], item["start_ms"]),
+        )
+        conn.execute(f"INSERT INTO timeline ({columns}) VALUES ({placeholders})", values)
 
 
 def timeline_at(conn: sqlite3.Connection, at_ms: int) -> sqlite3.Row | None:

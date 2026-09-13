@@ -68,6 +68,11 @@ written in OCI format and the `HEALTHCHECK` is silently dropped:
 podman build --format docker -t rockfm-enrichment:latest .
 ```
 
+Note that rootless podman without systemd never actually runs the healthcheck --
+the container sits at `starting` forever. That is a podman behaviour, not a
+problem with the image; `curl localhost:8080/api/health` reports the same thing
+directly, and Docker runs the check normally.
+
 Then point a player at `http://<host>:8080/hls/playlist.m3u8`, or open
 `http://<host>:8080/` for a small web player. On Unraid, use
 `unraid-template.xml`.

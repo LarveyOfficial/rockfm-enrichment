@@ -46,6 +46,7 @@ from .fingerprint import FingerprintIndex
 from .recognize import Recognition
 from .recognize import build as build_recognizer
 from .rockfm_api import RockFmApi, catalog_key
+from .timeshift import target_delay_seconds
 
 log = logging.getLogger("rockfm.analyzer")
 
@@ -55,6 +56,7 @@ STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
 BISECT_LIMIT_MS = 2_000    # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
 WINDOW_MS = 600_000        # decoded per pass
+MIN_WINDOW_MS = 300_000    # never nibble at the live edge -- see run_once
 TAIL_GUARD_MS = 90_000     # leave the newest audio alone; it may still be arriving
 MIN_LOCAL_SCORE = 0.02
 # Boundary tests need a stricter bar than identification. A probe only has to
@@ -337,7 +339,25 @@ class Analyzer:
                 runs[-1].last_ms = position
             else:
                 runs.append(Run(key=key, label=label, first_ms=position, last_ms=position))
-        return runs
+
+        # A single unidentified probe between two probes of the same song is
+        # that song: a quiet passage, or a probe that happened to land somewhere
+        # the recogniser could not place. Punching a hole in the middle of a
+        # track would be worse than bridging it.
+        merged: list[Run] = []
+        for run in runs:
+            if (
+                len(merged) >= 2
+                and run.key is not None
+                and merged[-1].key is None
+                and merged[-2].key == run.key
+                and merged[-1].first_ms == merged[-1].last_ms
+            ):
+                merged.pop()
+                merged[-1].last_ms = run.last_ms
+                continue
+            merged.append(run)
+        return merged
 
     def _relearn(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Replace the reference with the whole aired span of this song."""
@@ -408,6 +428,12 @@ class Analyzer:
             item.duration_ms / 1000, item.source,
         )
 
+    def _must_analyze_now(self, start_ms: int) -> bool:
+        """True once this audio is close enough to airing that we cannot wait."""
+        delay_ms = target_delay_seconds(self.config) * 1000
+        lead_ms = self.config.lead_time_minutes * 60_000
+        return time.time() * 1000 >= start_ms + delay_ms - lead_ms
+
     def run_once(self) -> int:
         available = self.reader.available()
         if available is None:
@@ -416,6 +442,16 @@ class Analyzer:
         start = max(start, available.start_ms)
         limit = available.end_ms - TAIL_GUARD_MS
         if limit - start < PROBE_MS * 2:
+            return 0
+
+        # Wait for a decent block of audio before analysing. Having caught up
+        # with the live edge, ingest only adds six seconds at a time, and a
+        # window barely longer than one probe gets exactly one probe -- so a
+        # single unmatched probe condemns the whole stretch to "unknown", and
+        # the cursor moves past it for good. With hours of delay in hand there
+        # is no reason to work that way; the only exception is audio close
+        # enough to airing that waiting would miss the deadline.
+        if limit - start < MIN_WINDOW_MS and not self._must_analyze_now(start):
             return 0
 
         end = min(start + WINDOW_MS, limit)

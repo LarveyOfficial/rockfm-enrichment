@@ -86,3 +86,26 @@ def test_window_covers_reports_what_can_be_probed(window):
     assert window.covers(1_000_000 + 100_000)
     assert not window.covers(1_000_000 + 119_000)
     assert not window.covers(999_000)
+
+
+def test_group_bridges_a_single_unmatched_probe_inside_a_song():
+    # One probe that named nothing, flanked by the same song either side --
+    # a quiet passage, not a boundary.
+    probes = [(0, label("a")), (24_000, None), (48_000, label("a"))]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == ["a"]
+    assert runs[0].first_ms == 0
+    assert runs[0].last_ms == 48_000
+
+
+def test_group_does_not_bridge_two_unmatched_probes():
+    # A longer unidentified stretch is a real break, not a blip.
+    probes = [(0, label("a")), (24_000, None), (48_000, None), (72_000, label("a"))]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == ["a", None, "a"]
+
+
+def test_group_does_not_bridge_between_different_songs():
+    probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == ["a", None, "b"]

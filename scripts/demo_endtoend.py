@@ -30,7 +30,8 @@ from rockfm.config import Config  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seconds", type=int, default=400)
+    parser.add_argument("--seconds", type=int, default=540,
+                        help="must exceed the analyzer minimum window plus its tail guard")
     parser.add_argument("--delay", type=int, default=0,
                         help="0 picks a delay that lands mid-song in what was just analyzed")
     parser.add_argument("--port", type=int, default=8123)

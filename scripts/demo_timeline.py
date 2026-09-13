@@ -30,7 +30,8 @@ MADRID = ZoneInfo("Europe/Madrid")
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("--seconds", type=int, default=600,
+                        help="must exceed the analyzer minimum window plus its tail guard")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--skip-record", action="store_true")
     parser.add_argument("--no-classify", action="store_true")

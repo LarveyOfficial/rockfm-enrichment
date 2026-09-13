@@ -48,3 +48,23 @@ def render(row: dict[str, Any], language: str = "es") -> tuple[str, str]:
         )
     # sintonia / desconocido: never guess, fall back to the station and show name.
     return (S.text(f"{kind}.primary", language) or S.STATION_NAME, show)
+
+
+def stream_title(row: dict[str, Any], language: str = "es") -> str:
+    """The single line a plain HLS or Icecast player shows.
+
+    Players expect "Artist - Title", so songs use exactly that rather than the
+    two-line form built for our own UI. Everything else falls back to its label.
+    """
+    if not row:
+        return S.STATION_NAME
+    if row.get("kind") == S.KIND_CANCION:
+        artist = (row.get("artist") or "").strip()
+        title = (row.get("title") or "").strip()
+        if artist and title:
+            return f"{artist} - {title}"
+        return title or artist or S.STATION_NAME
+    primary, secondary = render(row, language)
+    if secondary and secondary != primary:
+        return f"{primary} - {secondary}"
+    return primary

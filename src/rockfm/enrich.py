@@ -94,6 +94,7 @@ def _rank(
     title: str,
     items: list[dict],
     read: "Callable[[dict], tuple[str, str, str | None, int | None]]",
+    collection_artist: "Callable[[dict], str | None]" = lambda _item: None,
 ) -> dict | None:
     """Pick the best release for artist/title.
 
@@ -113,11 +114,18 @@ def _rank(
         score = 0.5 * artist_similarity + 0.5 * title_similarity
         if score < MIN_SIMILARITY:
             continue
+        # A release credited to someone other than the performer is a
+        # various-artists compilation. That is a far more reliable signal than
+        # guessing from album titles, and it catches the ones whose names give
+        # nothing away -- along with the nonsense release years they carry.
+        owner = collection_artist(item)
+        compilation = bool(owner and similarity(owner, item_artist) < 0.6)
+
         candidates.append(
             _Candidate(
                 score=score,
                 junk=_is_junk(item_artist, item_title, album),
-                secondary=_matches(SECONDARY_MARKERS, item_title, album),
+                secondary=compilation or _matches(SECONDARY_MARKERS, item_title, album),
                 year=year,
                 payload=item,
             )
@@ -174,6 +182,7 @@ class Enricher:
                 item.get("collectionName"),
                 int(item["releaseDate"][:4]) if item.get("releaseDate") else None,
             ),
+            collection_artist=lambda item: item.get("collectionArtistName"),
         )
         if best is None:
             return None

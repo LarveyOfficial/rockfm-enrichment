@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from . import db, hlsutil, labels
 from . import strings_es as S
@@ -101,8 +101,7 @@ class Playout:
             raise HTTPException(status_code=404, detail="segment file missing") from None
 
         item = db.timeline_at(self.conn, pdt_ms)
-        primary, secondary = self._render(item)
-        label = f"{primary} - {secondary}" if secondary else primary
+        label = labels.stream_title(dict(item) if item else {}, self.config.display_language)
         try:
             return hlsutil.rewrite_tit2(data, label)
         except Exception as exc:  # never fail playout over a metadata rewrite
@@ -248,6 +247,22 @@ def create_app(config: Config | None = None) -> FastAPI:
             content=state.segment_bytes(pdt_ms),
             media_type=AAC_TYPE,
             headers={"Cache-Control": "public, max-age=60", "Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/art/{name}")
+    def art(name: str) -> FileResponse:
+        # Artwork is cached under a hashed name; refuse anything else so a
+        # crafted path cannot walk out of the cache directory.
+        if not name.endswith(".jpg") or not name[:-4].isalnum():
+            raise HTTPException(status_code=404, detail="unknown artwork")
+        path = config.art_dir / name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="unknown artwork")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400",
+                     "Access-Control-Allow-Origin": "*"},
         )
 
     @app.get("/api/nowplaying")

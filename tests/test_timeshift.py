@@ -1,9 +1,7 @@
-from datetime import datetime, timedelta, timezone
-
-import time_machine
+from datetime import UTC, datetime, timedelta
 
 from rockfm.config import Config
-from rockfm.timeshift import DelayController, MAX_DEFERRAL, target_delay_seconds
+from rockfm.timeshift import MAX_DEFERRAL, DelayController, target_delay_seconds
 
 HOUR = 3600
 
@@ -13,7 +11,7 @@ def cfg(**kw):
 
 
 def at(iso: str) -> datetime:
-    return datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(iso).replace(tzinfo=UTC)
 
 
 def test_normal_offset_is_six_hours():

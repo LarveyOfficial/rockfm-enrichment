@@ -13,8 +13,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -93,8 +93,8 @@ def _rank(
     artist: str,
     title: str,
     items: list[dict],
-    read: "Callable[[dict], tuple[str, str, str | None, int | None]]",
-    collection_artist: "Callable[[dict], str | None]" = lambda _item: None,
+    read: Callable[[dict], tuple[str, str, str | None, int | None]],
+    collection_artist: Callable[[dict], str | None] = lambda _item: None,
 ) -> dict | None:
     """Pick the best release for artist/title.
 

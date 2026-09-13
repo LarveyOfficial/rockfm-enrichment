@@ -14,7 +14,7 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -70,7 +70,7 @@ def main() -> None:
     print(f"\n{'MADRID':<10} {'DUR':>7}  {'KIND':<12}  WHAT IS SHOWN")
     print("-" * 96)
     for row in rows:
-        clock = datetime.fromtimestamp(row["start_ms"] / 1000, tz=timezone.utc).astimezone(MADRID)
+        clock = datetime.fromtimestamp(row["start_ms"] / 1000, tz=UTC).astimezone(MADRID)
         primary, secondary = labels.render(dict(row))
         shown = primary + (f"   ·   {secondary}" if secondary else "")
         print(

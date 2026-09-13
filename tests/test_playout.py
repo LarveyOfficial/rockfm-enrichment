@@ -1,7 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from rockfm import db
 from rockfm.config import Config
 from rockfm.playout import create_app
 

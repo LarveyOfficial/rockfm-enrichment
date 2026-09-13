@@ -12,7 +12,7 @@ dependencies = [
 [project.optional-dependencies]
 recognize = ["numpy>=1.26", "scipy>=1.12", "shazamio>=0.7"]
 classify = ["inaSpeechSegmenter>=0.8"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "time-machine>=2.14"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -24,3 +24,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]

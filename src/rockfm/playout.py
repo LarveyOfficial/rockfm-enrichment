@@ -12,7 +12,7 @@ import asyncio
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -74,7 +74,7 @@ class Playout:
                 expected = previous["pdt_ms"] + previous["duration_ms"]
                 if row["pdt_ms"] - expected > GAP_TOLERANCE_MS:
                     discontinuity = True
-            pdt = datetime.fromtimestamp(row["pdt_ms"] / 1000, tz=timezone.utc) + shift
+            pdt = datetime.fromtimestamp(row["pdt_ms"] / 1000, tz=UTC) + shift
             out.append(
                 hlsutil.OutSegment(
                     uri=f"{SEGMENT_PREFIX}{row['pdt_ms']}.aac",
@@ -151,7 +151,7 @@ class Playout:
         }
 
     def now_playing(self) -> dict:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         position = self.position_ms(now)
         current = db.timeline_at(self.conn, position)
         upcoming = db.timeline_after(self.conn, position)
@@ -181,7 +181,7 @@ class Playout:
 
     def health(self) -> dict:
         latest = db.latest_segment(self.conn)
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
         lag = (now_ms - latest["pdt_ms"]) / 1000 if latest else None
         position = self.position_ms()
         playable = db.segment_at(self.conn, position) is not None
@@ -196,7 +196,7 @@ class Playout:
 
 
 def _iso(epoch_ms: int) -> str:
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).isoformat()
 
 
 def create_app(config: Config | None = None) -> FastAPI:

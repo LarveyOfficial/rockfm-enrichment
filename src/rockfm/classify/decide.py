@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .. import db
 from .. import strings_es as S
@@ -28,7 +28,8 @@ from ..config import Config
 from ..rockfm_api import Programme
 from ..schedule import Schedule
 from .repetition import Cluster, RepetitionIndex
-from .segmenter import MUSIC, SPEECH, UNKNOWN, build as build_segmenter
+from .segmenter import MUSIC, SPEECH
+from .segmenter import build as build_segmenter
 
 log = logging.getLogger("rockfm.classify")
 
@@ -65,7 +66,7 @@ class Classifier:
     # --- helpers ---
 
     def _madrid(self, at_ms: int) -> datetime:
-        return datetime.fromtimestamp(at_ms / 1000, tz=timezone.utc).astimezone(
+        return datetime.fromtimestamp(at_ms / 1000, tz=UTC).astimezone(
             self.config.source_tz
         )
 

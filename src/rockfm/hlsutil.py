@@ -12,7 +12,7 @@ label. We never read the upstream one: it is wrong.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urljoin
 
 ID3_MAGIC = b"ID3"
@@ -53,8 +53,8 @@ def parse_datetime(raw: str) -> datetime:
         value = value[:-1] + "+00:00"
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def is_master_playlist(text: str) -> bool:
@@ -122,7 +122,7 @@ def parse_media(text: str, base_url: str) -> MediaPlaylist:
 
 def format_datetime(moment: datetime) -> str:
     """Render an EXT-X-PROGRAM-DATE-TIME value with millisecond precision."""
-    utc = moment.astimezone(timezone.utc)
+    utc = moment.astimezone(UTC)
     return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
 
 

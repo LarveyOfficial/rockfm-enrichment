@@ -14,7 +14,7 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -74,7 +74,7 @@ def main() -> None:
         total += 1
         matched += result is not None
         clock = datetime.fromtimestamp(
-            (base_ms + start * 1000) / 1000, tz=timezone.utc
+            (base_ms + start * 1000) / 1000, tz=UTC
         ).astimezone(MADRID)
         found = (
             f"{result.artist} - {result.title}"

@@ -31,19 +31,21 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC
 
 import numpy as np
 from scipy.signal import resample_poly
 
 from . import db, fingerprint
+from . import strings_es as S
 from .audio import ANALYSIS_RATE
 from .buffer import BufferReader
 from .config import Config
 from .enrich import Enricher
 from .fingerprint import FingerprintIndex
-from .recognize import Recognition, build as build_recognizer
+from .recognize import Recognition
+from .recognize import build as build_recognizer
 from .rockfm_api import RockFmApi, catalog_key
-from . import strings_es as S
 
 log = logging.getLogger("rockfm.analyzer")
 
@@ -436,9 +438,9 @@ class Analyzer:
 
 
 def _clock(epoch_ms: int) -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).strftime("%H:%M:%S")
 
 
 def main() -> None:

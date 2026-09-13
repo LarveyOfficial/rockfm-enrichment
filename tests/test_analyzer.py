@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from rockfm.analyzer import PROBE_MS, Analyzer, Label, Run, Window
+from rockfm.analyzer import PROBE_MS, Analyzer, Label, Window
 from rockfm.audio import ANALYSIS_RATE
 
 RECOGNIZE_RATE = 16000

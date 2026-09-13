@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .config import Config
 
@@ -30,9 +30,9 @@ def target_delay_seconds(config: Config, now: datetime | None = None) -> int:
     """Seconds of delay needed so source wall-clock time matches local wall-clock time."""
     if config.delay_seconds_override is not None:
         return config.delay_seconds_override
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     source_offset = moment.astimezone(config.source_tz).utcoffset() or timedelta()
     local_offset = moment.astimezone(config.local_tz).utcoffset() or timedelta()
     return int((source_offset - local_offset).total_seconds())
@@ -40,7 +40,7 @@ def target_delay_seconds(config: Config, now: datetime | None = None) -> int:
 
 def source_wallclock(config: Config, now: datetime | None = None) -> datetime:
     """The source-timezone wall clock currently being played out."""
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     return (moment - timedelta(seconds=target_delay_seconds(config, moment))).astimezone(
         config.source_tz
     )
@@ -48,7 +48,7 @@ def source_wallclock(config: Config, now: datetime | None = None) -> datetime:
 
 def playout_position(config: Config, delay_seconds: int, now: datetime | None = None) -> int:
     """Epoch ms in the recorded buffer that should be airing right now."""
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     return int((moment.timestamp() - delay_seconds) * 1000)
 
 
@@ -63,7 +63,7 @@ class DelayController:
 
     def __init__(self, config: Config, now: datetime | None = None) -> None:
         self.config = config
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         self.current: int = target_delay_seconds(config, moment)
         self.pending: PendingChange | None = None
         log.info("initial delay: %d s (%.1f h)", self.current, self.current / 3600)
@@ -73,7 +73,7 @@ class DelayController:
 
         `safe` should be True when playout is not in the middle of a song.
         """
-        moment = now or datetime.now(timezone.utc)
+        moment = now or datetime.now(UTC)
         target = target_delay_seconds(self.config, moment)
 
         if target == self.current:

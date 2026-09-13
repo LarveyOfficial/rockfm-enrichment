@@ -13,8 +13,7 @@ import signal
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
 import httpx
 
@@ -29,7 +28,7 @@ MASTER_REFRESH_SECONDS = 300
 
 def segment_relpath(pdt_ms: int) -> str:
     """Shard segments by UTC day/hour so directories stay small and prune cheaply."""
-    moment = datetime.fromtimestamp(pdt_ms / 1000, tz=timezone.utc)
+    moment = datetime.fromtimestamp(pdt_ms / 1000, tz=UTC)
     return f"{moment:%Y%m%d}/{moment:%H}/{pdt_ms}.aac"
 
 

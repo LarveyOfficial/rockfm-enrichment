@@ -45,7 +45,7 @@ class Throttled:
     makes that a guarantee rather than a hope.
     """
 
-    def __init__(self, inner: "Recognizer", min_interval: float = 3.0, max_backoff: float = 120.0):
+    def __init__(self, inner: Recognizer, min_interval: float = 3.0, max_backoff: float = 120.0):
         self.inner = inner
         self.name = inner.name
         self.min_interval = min_interval

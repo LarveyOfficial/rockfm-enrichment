@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -46,7 +46,7 @@ def test_media_playlist_parsing():
     assert first.seq == 129160
     assert first.duration == pytest.approx(6.016)
     assert first.uri.endswith("l_41866_774960042_129160.aac")
-    assert first.pdt == datetime(2026, 9, 13, 20, 27, 10, 601000, tzinfo=timezone.utc)
+    assert first.pdt == datetime(2026, 9, 13, 20, 27, 10, 601000, tzinfo=UTC)
     assert playlist.segments[1].seq == 129161
 
 

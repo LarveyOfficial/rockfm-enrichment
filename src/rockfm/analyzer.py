@@ -506,23 +506,7 @@ class Analyzer:
                 continue
             merged.append(run)
 
-        # A brief unidentified stretch between two different songs is the
-        # transition itself -- probes that straddled the change and matched
-        # neither side. Emitting that as a few seconds of "RockFM" between every
-        # pair of tracks is noise; let the two songs share a boundary instead.
-        # Anything longer than a scan step is a real break and is kept.
-        without_seams: list[Run] = []
-        for index, run in enumerate(merged):
-            straddles_a_change = (
-                run.key is None
-                and 0 < index < len(merged) - 1
-                and merged[index - 1].key is not None
-                and merged[index + 1].key is not None
-                and run.last_ms - run.first_ms <= STEP_MS
-            )
-            if not straddles_a_change:
-                without_seams.append(run)
-        return without_seams
+        return merged
 
     def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Teach a span, unless this window already taught one covering it."""
@@ -606,7 +590,8 @@ class Analyzer:
 
         keep = runs[:-1] if len(runs) > 1 else runs
         segments = [(run, edges[i], edges[i + 1]) for i, run in enumerate(keep)]
-        return self._absorb_slivers(segments)
+        seam_ms = int(settings.load(self.conn)["max_seam_seconds"] * 1000)
+        return self._absorb_slivers(segments, seam_ms)
 
     def process_window(self, window: Window) -> int:
         """Scan the window, publishing each item as soon as it is settled.
@@ -664,26 +649,43 @@ class Analyzer:
 
     @staticmethod
     def _absorb_slivers(
-        segments: list[tuple[Run, int, int]],
+        segments: list[tuple[Run, int, int]], seam_ms: int
     ) -> list[tuple[Run, int, int]]:
-        """Fold anything too short to be a song into its neighbour.
+        """Fold away fragments, judged on how long they actually are.
 
-        A window is rewound to the boundary before its last run, and that
-        boundary is only accurate to a second or two -- so the next window opens
-        on a brief tail of the song just committed. Emitted on its own it became
-        a sliver of "RockFM" wedged between every pair of tracks. It belongs to
-        whichever item it abuts, and the timeline stays gapless either way.
+        Two different things end up too small to publish. A *named* fragment is
+        an artefact: a window is rewound to the boundary before its last run, so
+        the next window opens on a second or two of the song just committed.
+        An *unnamed* fragment shorter than the crossfade seam is the transition
+        between two tracks.
+
+        Anything longer is real content -- a presenter link, a jingle, an advert
+        -- and must survive to reach the classifier. Judging that by how many
+        probes a stretch spanned rather than how long it lasted is what made an
+        eighteen second link between two songs disappear: it fell inside a
+        single probe, so it measured as zero.
         """
         cleaned: list[tuple[Run, int, int]] = []
         carried_start: int | None = None
         for index, (run, start_ms, end_ms) in enumerate(segments):
             if carried_start is not None:
                 start_ms, carried_start = carried_start, None
-            if end_ms - start_ms < MIN_SONG_MS:
-                if index + 1 < len(segments):
-                    carried_start = start_ms  # hand the span to what follows
+
+            duration = end_ms - start_ms
+            fragment = duration < (MIN_SONG_MS if run.key is not None else seam_ms)
+            if fragment:
+                has_next = index + 1 < len(segments)
+                if has_next and cleaned:
+                    # Between two neighbours: split it and let them meet.
+                    middle = start_ms + duration // 2
+                    previous_run, previous_start, _ = cleaned[-1]
+                    cleaned[-1] = (previous_run, previous_start, middle)
+                    carried_start = middle
                     continue
-                if cleaned:  # trailing sliver: give it to what came before
+                if has_next:
+                    carried_start = start_ms
+                    continue
+                if cleaned:
                     previous_run, previous_start, _ = cleaned[-1]
                     cleaned[-1] = (previous_run, previous_start, end_ms)
                     continue

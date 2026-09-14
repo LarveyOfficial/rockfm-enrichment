@@ -123,15 +123,17 @@ def test_group_does_not_bridge_a_real_break():
 def test_group_never_merges_two_different_songs_together():
     probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
     runs = Analyzer._group(probes)
-    # The seam is dropped, but a and b stay distinct.
-    assert [run.key for run in runs] == ["a", "b"]
+    assert [run.key for run in runs].count("a") == 1
+    assert [run.key for run in runs].count("b") == 1
 
 
-def test_a_lone_probe_between_two_songs_is_the_transition_not_an_item():
-    """Otherwise every song change leaves six seconds of 'RockFM' behind."""
+def test_grouping_keeps_an_unidentified_stretch_between_two_songs():
+    """Whether it is a crossfade or a presenter link depends on how long it
+    lasted, which grouping cannot know -- that is decided once boundaries are
+    placed. Discarding it here lost real content."""
     probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
     runs = Analyzer._group(probes)
-    assert [run.key for run in runs] == ["a", "b"]
+    assert [run.key for run in runs] == ["a", None, "b"]
 
 
 def test_a_real_break_between_two_songs_survives():

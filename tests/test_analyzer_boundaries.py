@@ -126,14 +126,52 @@ def test_no_slivers_are_emitted_between_tracks(tmp_path, played):
 
 
 def test_absorb_slivers_folds_a_leading_tail_into_what_follows():
-    run_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
     from rockfm.analyzer import Run
 
-    tail = Run(key="a", label=run_a, first_ms=0, last_ms=0)
-    real = Run(key="b", label=run_a, first_ms=6_000, last_ms=200_000)
-    cleaned = Analyzer._absorb_slivers([(tail, 0, 2_000), (real, 2_000, 200_000)])
+    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
+    tail = Run(key="a", label=label_a, first_ms=0, last_ms=0)
+    real = Run(key="b", label=label_a, first_ms=6_000, last_ms=200_000)
+    cleaned = Analyzer._absorb_slivers(
+        [(tail, 0, 2_000), (real, 2_000, 200_000)], seam_ms=10_000
+    )
     assert len(cleaned) == 1
     assert cleaned[0][1] == 0 and cleaned[0][2] == 200_000
+
+
+def test_a_short_unnamed_stretch_between_songs_is_split_between_them():
+    """A crossfade belongs to neither song, so let them meet in the middle."""
+    from rockfm.analyzer import Run
+
+    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
+    label_b = Label(key="b", artist="x", title="b", source="s", confidence=1, track_id=2)
+    song_a = Run(key="a", label=label_a, first_ms=0, last_ms=100_000)
+    seam = Run(key=None, label=None, first_ms=100_000, last_ms=100_000)
+    song_b = Run(key="b", label=label_b, first_ms=106_000, last_ms=300_000)
+
+    cleaned = Analyzer._absorb_slivers(
+        [(song_a, 0, 100_000), (seam, 100_000, 106_000), (song_b, 106_000, 300_000)],
+        seam_ms=10_000,
+    )
+    assert [run.key for run, _s, _e in cleaned] == ["a", "b"]
+    assert cleaned[0][2] == cleaned[1][1] == 103_000
+
+
+def test_a_presenter_link_between_songs_survives():
+    """Eighteen seconds of talk fell inside a single probe and was discarded."""
+    from rockfm.analyzer import Run
+
+    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
+    label_b = Label(key="b", artist="x", title="b", source="s", confidence=1, track_id=2)
+    song_a = Run(key="a", label=label_a, first_ms=0, last_ms=100_000)
+    link = Run(key=None, label=None, first_ms=100_000, last_ms=100_000)
+    song_b = Run(key="b", label=label_b, first_ms=118_100, last_ms=300_000)
+
+    cleaned = Analyzer._absorb_slivers(
+        [(song_a, 0, 100_000), (link, 100_000, 118_100), (song_b, 118_100, 300_000)],
+        seam_ms=10_000,
+    )
+    assert [run.key for run, _s, _e in cleaned] == ["a", None, "b"]
+    assert cleaned[1][2] - cleaned[1][1] == pytest.approx(18_100)
 
 
 # --- match offsets, retries, confidence, duration sanity -------------------

@@ -294,6 +294,15 @@ class FingerprintIndex:
 
     # --- matching ---
 
+    def _track_ids(self, kind: str) -> set[int]:
+        """Every track id of one kind. Small, and indexed by `idx_fp_tracks_kind`."""
+        return {
+            int(row["id"])
+            for row in self.conn.execute(
+                "SELECT id FROM fp_tracks WHERE kind = ?", (kind,)
+            )
+        }
+
     def match(
         self,
         hashes: list[tuple[int, int]],
@@ -309,6 +318,18 @@ class FingerprintIndex:
             by_hash[value].append(offset)
         unique = list(by_hash)
 
+        # Narrow by kind in Python, not in SQL. Expressed as a subquery, the
+        # filter costs SQLite the hash index: instead of seeking a few thousand
+        # hashes it scans every row in the table, which on a seeded index is
+        # millions. Measured at 8M rows the same query took 3.83s with the
+        # subquery and 0.02s without it, returning identical rows -- and a probe
+        # runs this twenty-odd times per song, between the scan, the extension
+        # and the edge search. Reading the handful of ids up front and skipping
+        # the rest as they arrive keeps the seek and costs nothing.
+        allowed = self._track_ids(kind) if kind else None
+        if allowed is not None and not allowed:
+            return None
+
         votes: dict[tuple[int, int], int] = defaultdict(int)
         for start in range(0, len(unique), SQLITE_PARAM_CHUNK):
             chunk = unique[start : start + SQLITE_PARAM_CHUNK]
@@ -317,13 +338,12 @@ class FingerprintIndex:
                 "SELECT h.hash, h.offset, h.track_id FROM fp_hashes h"
                 f" WHERE h.hash IN ({placeholders})"
             )
-            params: list = list(chunk)
-            if kind:
-                sql += " AND h.track_id IN (SELECT id FROM fp_tracks WHERE kind = ?)"
-                params.append(kind)
-            for row in self.conn.execute(sql, params):
+            for row in self.conn.execute(sql, list(chunk)):
+                track_id = row["track_id"]
+                if allowed is not None and track_id not in allowed:
+                    continue
                 for query_offset in by_hash[row["hash"]]:
-                    votes[(row["track_id"], row["offset"] - query_offset)] += 1
+                    votes[(track_id, row["offset"] - query_offset)] += 1
 
         if not votes:
             return None

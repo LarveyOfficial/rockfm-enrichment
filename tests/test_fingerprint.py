@@ -107,3 +107,43 @@ def test_repeat_airing_counts_without_duplicating_hashes(index):
     assert again == track_id
     assert index.occurrences(track_id) == 2
     assert index._hash_count(track_id) == stored
+
+
+def test_kind_filtering_does_not_cost_the_hash_index(index) -> None:
+    """The kind filter must narrow the result, not the query plan.
+
+    Written as `AND h.track_id IN (SELECT id FROM fp_tracks WHERE kind = ?)`
+    this filter made SQLite abandon the hash index and scan every row: at eight
+    million rows the identical query took 3.83s with the subquery and 0.02s
+    without. Matching runs twenty-odd times per song, so that one clause was the
+    difference between a window scanned in seconds and one scanned in hours.
+    """
+    index.add(kind="music", key="song", hashes=fingerprint.compute(synth(1)),
+              title="song", artist="a", source="preview", anchor_ms=0)
+    index.conn.commit()
+
+    plan = " ".join(
+        str(row[3])
+        for row in index.conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT h.hash, h.offset, h.track_id FROM fp_hashes h"
+            " WHERE h.hash IN (1, 2, 3)"
+        )
+    )
+    assert "idx_fp_hashes_hash" in plan, plan
+    assert "SCAN fp_hashes" not in plan, plan
+
+
+def test_kind_still_separates_music_from_everything_else(index) -> None:
+    speech = fingerprint.compute(synth(7))
+    index.add(kind="nonmusic", key="advert", hashes=speech,
+              title=None, artist=None, source="broadcast", anchor_ms=0)
+    index.add(kind="music", key="song", hashes=fingerprint.compute(synth(8)),
+              title="song", artist="a", source="preview", anchor_ms=0)
+    index.conn.commit()
+
+    assert index.match(speech, kind="nonmusic").key == "advert"
+    # The same audio must stay invisible to a music lookup.
+    assert index.match(speech, kind="music") is None
+    # And a kind nothing has been filed under matches nothing at all.
+    assert index.match(speech, kind="nothing-here") is None

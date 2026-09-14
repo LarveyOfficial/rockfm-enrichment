@@ -45,6 +45,12 @@ radio: 16 calls on a cold index, 0 on a warm one over the same audio.
 audio we have heard before (`publicidad`), someone talking (`programa`), and
 none of the above (`desconocido`).
 
+**Seams between songs.** Radio crossfades, and each edge is located
+independently, so a few seconds can fall between one song ending and the next
+beginning. Anything shorter than the non-music threshold is split down the
+middle so the two songs abut -- otherwise a player keeps showing the previous
+song through the gap, since nothing tells it to change.
+
 **Adverts vs DJ talk.** Adverts repeat; a presenter talking never does. Non-song audio is fingerprinted into a second index, so anything heard
 before is an advert or an ident and anything genuinely new is live talk. A
 trained speech/music model keeps an unrecognised *song* from being mistaken for

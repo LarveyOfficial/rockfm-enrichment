@@ -36,7 +36,7 @@ from datetime import UTC
 import numpy as np
 from scipy.signal import resample_poly
 
-from . import db, fingerprint
+from . import db, fingerprint, settings
 from . import strings_es as S
 from .audio import ANALYSIS_RATE
 from .buffer import BufferReader
@@ -690,9 +690,32 @@ class Analyzer:
             cleaned.append((run, start_ms, end_ms))
         return cleaned
 
+    def _close_seam(self, start_ms: int) -> int:
+        """Meet the previous item in the middle if only a seam separates us.
+
+        Songs are separated by crossfades, and locating each edge independently
+        leaves a few seconds belonging to neither -- too short to be an advert
+        or anything else worth naming, but long enough that a player shows the
+        previous song through it, since nothing tells it otherwise. Anything
+        below the non-music threshold is split down the middle so the two songs
+        simply abut.
+        """
+        previous = db.previous_timeline(self.conn, start_ms)
+        if previous is None:
+            return start_ms
+        seam = start_ms - previous["end_ms"]
+        threshold = int(settings.load(self.conn)["min_nonmusic_seconds"] * 1000)
+        if not 0 < seam <= threshold:
+            return start_ms
+        middle = previous["end_ms"] + seam // 2
+        db.set_timeline_end(self.conn, previous["id"], middle)
+        log.debug("closed a %.1fs seam before %s", seam / 1000, _clock(start_ms))
+        return middle
+
     def _commit_run(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         if end_ms <= start_ms:
             return
+        start_ms = self._close_seam(start_ms)
         if run.key is None or end_ms - start_ms < MIN_SONG_MS:
             self._commit(
                 Item(

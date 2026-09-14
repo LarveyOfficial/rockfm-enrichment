@@ -394,3 +394,15 @@ def upsert_song_meta(conn: sqlite3.Connection, row: dict, updated_ms: int) -> No
 
 def get_song_meta(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM song_meta WHERE key = ?", (key,)).fetchone()
+
+
+def previous_timeline(conn: sqlite3.Connection, before_ms: int) -> sqlite3.Row | None:
+    """The item ending closest before `before_ms`."""
+    return conn.execute(
+        "SELECT * FROM timeline WHERE end_ms <= ? ORDER BY end_ms DESC LIMIT 1",
+        (before_ms,),
+    ).fetchone()
+
+
+def set_timeline_end(conn: sqlite3.Connection, item_id: int, end_ms: int) -> None:
+    conn.execute("UPDATE timeline SET end_ms = ? WHERE id = ?", (end_ms, item_id))

@@ -202,3 +202,46 @@ def test_a_probe_that_comes_back_empty_is_retried_elsewhere(tmp_path):
 
     assert found is not None and found.title == "Denis"
     assert len(asked) > 1, "gave up after a single miss"
+
+
+def test_items_are_published_during_the_scan_not_only_at_the_end(tmp_path, played):
+    """A cold window is minutes of throttled calls; waiting for all of them
+    meant an empty dashboard and then everything at once."""
+    analyzer = build(tmp_path)
+    seen_at_probe: list[int] = []
+    probes = {"n": 0}
+
+    def identify(_window, at_ms):
+        probes["n"] += 1
+        name = song_at(played, at_ms)
+        if name is None:
+            return None
+        return Label(key=name, artist="x", title=name, source="stub",
+                     confidence=1.0, track_id=1)
+
+    analyzer._identify = identify
+    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at + PROBE_MS // 2) == key
+    analyzer._edge_match = lambda _w, at, key: song_at(played, at + BISECT_PROBE_MS // 2) == key
+    analyzer._enriched = lambda item: item
+    analyzer._relearn = lambda *a: None
+    analyzer._commit = lambda item: seen_at_probe.append(probes["n"])
+
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
+
+    assert seen_at_probe, "nothing was committed at all"
+    total = probes["n"]
+    assert min(seen_at_probe) < total, (
+        f"first item only appeared after every probe ({min(seen_at_probe)}/{total})"
+    )
+
+
+def test_progress_is_recorded_while_scanning(tmp_path, played):
+    analyzer = build(tmp_path)
+    analyzer._identify = lambda _w, at: None
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
+
+    progress = db.get_meta(analyzer.conn, db.ANALYZER_PROGRESS_KEY)
+    done, total = progress.split("/")
+    assert int(done) == int(total) > 1

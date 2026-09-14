@@ -281,6 +281,7 @@ class Playout:
             "analyzer": {
                 "cursor": cursor,
                 "state": db.get_meta(self.conn, db.ANALYZER_STATE_KEY),
+                "progress": db.get_meta(self.conn, db.ANALYZER_PROGRESS_KEY) or None,
                 "last_active_seconds": (now_ms - heartbeat) / 1000 if heartbeat else None,
                 # How far the analyzer still is from the newest recorded audio.
                 # In steady state this stays small; a growing number means it is

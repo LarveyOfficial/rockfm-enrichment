@@ -173,3 +173,12 @@ def test_replay_segments_are_actually_reachable(env, tmp_path):
         response = client.get(uri)
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/aac"
+
+
+def test_status_reports_scan_progress(env):
+    _, conn, client = env
+    db.set_meta(conn, db.ANALYZER_STATE_KEY, "scanning")
+    db.set_meta(conn, db.ANALYZER_PROGRESS_KEY, "21/37")
+    analyzer = client.get("/api/status").json()["analyzer"]
+    assert analyzer["state"] == "scanning"
+    assert analyzer["progress"] == "21/37"

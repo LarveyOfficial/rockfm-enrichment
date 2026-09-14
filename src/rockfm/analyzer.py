@@ -202,15 +202,21 @@ class Analyzer:
     def set_cursor(self, value: int) -> None:
         db.set_meta(self.conn, CURSOR_KEY, str(value))
 
-    def _note(self, state: str) -> None:
+    def _note(self, state: str, done: int | None = None, total: int | None = None) -> None:
         """Record what the analyzer is doing, for the dashboard.
 
-        A cold first pass probes a whole window before committing anything, so
-        without this the only visible sign of life arrives minutes late and the
-        thing looks dead.
+        The heartbeat is written on every probe, not just on state changes.
+        Without that there is no way to tell a slow cold scan -- where each of
+        forty-odd probes is a throttled network call -- apart from a hung one,
+        and the first window of a fresh install looks dead for several minutes.
         """
         db.set_meta(self.conn, db.ANALYZER_STATE_KEY, state)
         db.set_meta(self.conn, db.ANALYZER_HEARTBEAT_KEY, str(int(time.time() * 1000)))
+        db.set_meta(
+            self.conn,
+            db.ANALYZER_PROGRESS_KEY,
+            f"{done}/{total}" if done is not None and total else "",
+        )
 
     # --- identification and boundary refinement ---
 
@@ -458,13 +464,9 @@ class Analyzer:
         middle = (last_outgoing + first_incoming) // 2
         return max(low, min(middle + correction, high + PROBE_MS))
 
-    def _scan(self, window: Window) -> list[tuple[int, Label | None]]:
-        probes: list[tuple[int, Label | None]] = []
-        position = window.start_ms
-        while window.covers(position):
-            probes.append((position, self._identify(window, position)))
-            position += STEP_MS
-        return probes
+    def _probe_count(self, window: Window) -> int:
+        span = window.end_ms - window.start_ms - PROBE_MS
+        return max(1, span // STEP_MS + 1)
 
     @staticmethod
     def _group(probes: list[tuple[int, Label | None]]) -> list[Run]:
@@ -526,23 +528,18 @@ class Analyzer:
             learned_ms=end_ms - start_ms,
         )
 
-    def process_window(self, window: Window) -> int:
-        """Commit everything in the window and return the new cursor.
-
-        The final run is deliberately left uncommitted and the cursor rewound to
-        its start: it is very likely a song still in progress at the window edge,
-        and re-reading it next pass keeps songs whole rather than split in two.
-        """
-        runs = self._group(self._scan(window))
+    def _plan(self, window: Window, probes: list[tuple[int, Label | None]]) -> list[tuple[Run, int, int]]:
+        """Group probes into runs and work out where each one starts and ends."""
+        runs = self._group(probes)
         if not runs:
-            return window.end_ms
+            return []
 
         # Teach the index each song over the whole stretch it was heard across,
         # before going looking for its edges. Bisection asks "is this still the
-        # same song?", and until now the only reference was the single twelve
-        # second probe that first identified it -- so the answer was no almost
-        # everywhere, and the boundary collapsed onto the last coarse probe.
-        # That is what pinned every song to a multiple of the scan step.
+        # same song?", and with only the twelve second probe that first
+        # identified it as a reference the answer was no almost everywhere, so
+        # the boundary collapsed onto the last coarse probe -- which is what
+        # pinned every song to a multiple of the scan step.
         for run in runs:
             if run.key is not None:
                 self._relearn(window, run, run.first_ms, run.last_ms + PROBE_MS)
@@ -572,17 +569,61 @@ class Analyzer:
             if edges[position - 1] < told < edges[position + 1]:
                 edges[position] = told
 
-        committed = runs[:-1] if len(runs) > 1 else runs
-        segments = [
-            (run, edges[position], edges[position + 1])
-            for position, run in enumerate(committed)
-        ]
-        for run, start_ms, end_ms in self._absorb_slivers(segments):
-            self._commit_run(window, run, start_ms, end_ms)
+        keep = runs[:-1] if len(runs) > 1 else runs
+        segments = [(run, edges[i], edges[i + 1]) for i, run in enumerate(keep)]
+        return self._absorb_slivers(segments)
 
-        if len(runs) > 1 and edges[-2] > window.start_ms:
-            return edges[-2]
+    def process_window(self, window: Window) -> int:
+        """Scan the window, publishing each item as soon as it is settled.
+
+        The scan is the slow part on a cold index -- forty-odd probes, each a
+        throttled network call. Waiting for all of them before writing anything
+        meant a fresh install showed an empty dashboard for several minutes and
+        then everything at once. Runs far enough behind the scan position can no
+        longer change, so they are committed as we go.
+        """
+        probes: list[tuple[int, Label | None]] = []
+        total = self._probe_count(window)
+        emitted_to = window.start_ms
+        position = window.start_ms
+        done = 0
+
+        while window.covers(position):
+            probes.append((position, self._identify(window, position)))
+            done += 1
+            position += STEP_MS
+            self._note("scanning", done, total)
+            # Grouping can still merge a run backwards across a short gap, so
+            # only publish what the scan has moved safely past.
+            settled = position - MAX_BRIDGE_MS - STEP_MS
+            if settled > emitted_to:
+                emitted_to = self._publish(window, probes, emitted_to, settled)
+
+        self._publish(window, probes, emitted_to, None)
+
+        runs = self._group(probes)
+        if len(runs) > 1:
+            plan = self._plan(window, probes)
+            if plan and plan[-1][2] > window.start_ms:
+                return plan[-1][2]
         return window.end_ms
+
+    def _publish(
+        self,
+        window: Window,
+        probes: list[tuple[int, Label | None]],
+        emitted_to: int,
+        settled_before: int | None,
+    ) -> int:
+        """Commit every planned item that is finished and not already written."""
+        for run, start_ms, end_ms in self._plan(window, probes):
+            if start_ms < emitted_to:
+                continue
+            if settled_before is not None and end_ms > settled_before:
+                break
+            self._commit_run(window, run, start_ms, end_ms)
+            emitted_to = end_ms
+        return emitted_to
 
     @staticmethod
     def _absorb_slivers(
@@ -591,11 +632,10 @@ class Analyzer:
         """Fold anything too short to be a song into its neighbour.
 
         A window is rewound to the boundary before its last run, and that
-        boundary is only accurate to a couple of seconds -- so the next window
-        opens on a two second tail of the song just committed. Emitted on its
-        own it became a sliver of "RockFM" wedged between every pair of tracks.
-        It belongs to whichever item it abuts, and the timeline stays gapless
-        either way.
+        boundary is only accurate to a second or two -- so the next window opens
+        on a brief tail of the song just committed. Emitted on its own it became
+        a sliver of "RockFM" wedged between every pair of tracks. It belongs to
+        whichever item it abuts, and the timeline stays gapless either way.
         """
         cleaned: list[tuple[Run, int, int]] = []
         carried_start: int | None = None

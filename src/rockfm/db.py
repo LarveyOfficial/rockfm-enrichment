@@ -19,6 +19,7 @@ ANALYZER_CURSOR_KEY = "analyzer_cursor_ms"
 # takes minutes -- long enough to look broken. These say what it is up to.
 ANALYZER_STATE_KEY = "analyzer_state"
 ANALYZER_HEARTBEAT_KEY = "analyzer_heartbeat_ms"
+ANALYZER_PROGRESS_KEY = "analyzer_progress"   # "done/total" through the window
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (

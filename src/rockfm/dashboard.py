@@ -200,10 +200,13 @@ function renderChips() {
   const out = [
     chip('ingest lag', lag == null ? '–' : lag.toFixed(0) + 's', lagLevel),
     chip('buffer', hhmm(b.seconds)),
-    chip('analyzer', a.state === 'scanning' ? 'scanning…'
+    chip('analyzer', a.state === 'scanning'
+           ? `scanning ${a.progress || ''}`.trim()
          : a.state === 'waiting' ? 'waiting for audio'
          : behind == null ? 'starting…' : 'behind ' + hhmm(behind),
-         a.last_active_seconds != null && a.last_active_seconds > 600 ? 'bad'
+         // Scanning writes a heartbeat every probe, so a stale one now really
+         // does mean stuck rather than merely slow.
+         a.last_active_seconds != null && a.last_active_seconds > 300 ? 'bad'
          : behind != null && behind > 900 ? 'warn' : ''),
     chip('segments', c.segments),
     chip('songs found', c.songs),

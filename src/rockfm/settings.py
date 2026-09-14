@@ -44,7 +44,7 @@ FIELDS: Final[dict[str, tuple[Any, str, str]]] = {
     # became the single largest cost in a scan, twelve seconds per probe against
     # a local match that takes twenty-seven milliseconds. Raise it only if a
     # recogniser is observed refusing calls.
-    "recognizer_interval_seconds": (0.0, "RECOGNIZER_INTERVAL_SECONDS", "number"),
+    "recognizer_interval_seconds": (0.35, "RECOGNIZER_INTERVAL_SECONDS", "number"),
     "min_nonmusic_seconds": (5.0, "MIN_NONMUSIC_SECONDS", "number"),
     "max_seam_seconds": (10.0, "MAX_SEAM_SECONDS", "number"),
     "azuracast_enabled": (False, "", "bool"),

@@ -39,18 +39,33 @@ class Recognizer(Protocol):
 
 # Seconds between calls when the recogniser is healthy. See
 # `settings.recognizer_interval_seconds`, which overrides this at runtime.
-# Pacing is opt-in: the backoff and circuit breaker below already handle a
-# recogniser that pushes back, and they do it on evidence rather than on
-# suspicion, without taxing every probe that would have succeeded.
-DEFAULT_MIN_INTERVAL = 0.0
+#
+# Small, and measured rather than guessed. Unpaced, the analyzer makes about
+# nine calls a second and Shazam starts returning throttle pages instead of
+# JSON within seconds; probed by hand at roughly one a second it answered
+# thirty-six times out of thirty-six. A third of a second keeps a full window
+# under a minute of lookups -- against twenty minutes of audio -- while staying
+# far away from the rate that breaks it. An earlier twelve seconds here was the
+# single largest cost in a scan; this is not that.
+DEFAULT_MIN_INTERVAL = 0.35
 
 # Consecutive failures before the external recogniser is left alone entirely.
-OPEN_AFTER_ERRORS = 4
+# Counted against real backoff, so reaching this takes half a minute of trying
+# rather than the few milliseconds it took when the backoff was accidentally
+# zero.
+OPEN_AFTER_ERRORS = 6
 
-# How long to stop calling it for once that happens. The local index keeps
-# working throughout, so the cost of waiting is only the songs it has not
-# learned yet -- far less than the cost of blocking on a service that is down.
-COOL_OFF_SECONDS = 900.0
+# Seconds to wait after the first failure, doubling each time. Deliberately not
+# derived from `min_interval`: pacing is about how fast to go when things work,
+# backoff is about how to behave when they do not, and tying them together
+# meant setting the pace to zero silently disabled the backoff entirely.
+BACKOFF_BASE_SECONDS = 1.0
+
+# How long to stop calling it for once the breaker opens. Short, because the
+# analyzer now holds unidentified audio rather than guessing at it: a long
+# blackout no longer produces wrong labels, it produces no progress. Long
+# enough to let a burst of throttling pass, short enough to recover from one.
+COOL_OFF_SECONDS = 120.0
 
 
 class Throttled:
@@ -68,9 +83,12 @@ class Throttled:
     every lookup returns immediately, so the analyser keeps moving on the local
     index instead of queueing behind a service that is not going to reply.
 
-    Only the healthy pacing interval sleeps. Backoff and cool-off return at once:
-    making the analyser wait out a penalty it cannot shorten just moves the
-    stall from the recogniser into the scan.
+    Pacing and backoff both wait; only an open breaker returns at once. The
+    difference matters because a caller reads None as "no song here". While
+    there is any prospect of an answer it is worth waiting for one -- there are
+    hours of buffer and nothing is going out on air for six of them. Once the
+    breaker is open there is no prospect, `degraded` says so, and the caller
+    holds the audio instead of drawing a conclusion from silence.
     """
 
     def __init__(
@@ -94,8 +112,15 @@ class Throttled:
 
     @property
     def degraded(self) -> bool:
-        """True when lookups are failing, so callers can stop asking twice."""
-        return self._consecutive_errors > 0
+        """True only when the recogniser is not being consulted at all.
+
+        Not merely "the last call failed". Callers use this to decide whether a
+        silence means the audio holds no song or that nobody asked, and a single
+        transient failure -- Shazam handing back a throttle page instead of JSON
+        -- is not that. Treating one blip as an outage held seventeen minutes of
+        audio, including a song the recogniser names at every offset.
+        """
+        return self._consecutive_errors >= self.open_after
 
     def recognize(self, samples: np.ndarray, rate: int) -> Recognition | None:
         import time
@@ -103,11 +128,17 @@ class Throttled:
         now = time.monotonic()
         wait = self._next_allowed - now
         if wait > 0:
-            if self._consecutive_errors:
-                # Penalty time. Answer now and let the local index carry it.
+            if self.degraded:
+                # The breaker is open: we are deliberately not calling at all,
+                # and the caller knows it, because `degraded` says so.
                 self.skipped += 1
                 return None
-            time.sleep(wait)
+            # Backoff waits rather than answering. Returning None here costs
+            # nothing in time and everything in meaning: the caller cannot tell
+            # it from "no song in this audio", and writes that down as fact.
+            # Seventeen minutes of radio, one song of it playing throughout,
+            # went to the timeline as unknown that way.
+            time.sleep(min(wait, self.max_backoff))
 
         self.calls += 1
         try:
@@ -122,7 +153,10 @@ class Throttled:
                 )
                 self._next_allowed = time.monotonic() + self.cool_off
             else:
-                delay = min(self.min_interval * 2**self._consecutive_errors, self.max_backoff)
+                delay = min(
+                    BACKOFF_BASE_SECONDS * 2 ** (self._consecutive_errors - 1),
+                    self.max_backoff,
+                )
                 log.warning("recogniser error (%s); backing off %.0fs", exc, delay)
                 self._next_allowed = time.monotonic() + delay
             return None

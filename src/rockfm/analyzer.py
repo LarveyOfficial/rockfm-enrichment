@@ -937,6 +937,14 @@ class Analyzer:
         done = 0
 
         while window.covers(position):
+            if self._recognizer_degraded():
+                log.info(
+                    "pausing the scan at %s: the recogniser is out, and probing on"
+                    " would spend calls we cannot make on answers we cannot trust",
+                    _clock(position),
+                )
+                self._held = True
+                break
             probes.append((position, self._identify(window, position)))
             done += 1
             position += STEP_MS
@@ -985,10 +993,11 @@ class Analyzer:
             if settled_before is not None and end_ms > settled_before:
                 break
             if run.key is None and self._recognizer_degraded():
-                log.info(
-                    "holding %.0fs at %s: the recogniser is down and this may be a song",
-                    (end_ms - start_ms) / 1000, _clock(start_ms),
-                )
+                if not self._held:
+                    log.info(
+                        "holding %.0fs at %s: the recogniser is down and this may"
+                        " be a song", (end_ms - start_ms) / 1000, _clock(start_ms),
+                    )
                 self._held = True
                 break
             self._commit_run(window, run, start_ms, end_ms)

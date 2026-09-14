@@ -128,26 +128,48 @@ def test_a_dead_recogniser_is_dropped_rather_than_waited_on() -> None:
     assert time.monotonic() - started < 1.0
 
 
-def test_backoff_never_sleeps_the_caller() -> None:
-    throttled = Throttled(_Recorder(TimeoutError("no answer")), min_interval=30.0)
+def test_an_open_breaker_answers_at_once() -> None:
+    """No prospect of an answer, and `degraded` tells the caller so."""
+    throttled = Throttled(
+        _Recorder(TimeoutError("no answer")), min_interval=0.0, open_after=1,
+        cool_off=600.0,
+    )
     throttled.recognize(np.zeros(8), 8000)
+    assert throttled.degraded
 
     started = time.monotonic()
     assert throttled.recognize(np.zeros(8), 8000) is None
     assert time.monotonic() - started < 1.0
+    assert throttled.skipped == 1
 
 
-def test_a_degraded_recogniser_is_flagged_so_callers_stop_asking_twice() -> None:
-    throttled = Throttled(_Recorder(TimeoutError("no answer")), min_interval=0.0)
+def test_one_blip_is_not_an_outage() -> None:
+    """Callers read `degraded` as "nobody asked", and act on it drastically.
+
+    On one transient failure the analyzer stopped extending songs and held
+    seventeen minutes of audio unlabelled -- including a track the recogniser
+    names at every offset. Only a recogniser that has stopped being consulted
+    counts.
+    """
+    throttled = Throttled(_Recorder(TimeoutError("no answer")), min_interval=0.0, open_after=3)
     assert not throttled.degraded
+
+    throttled._next_allowed = 0.0
     throttled.recognize(np.zeros(8), 8000)
-    assert throttled.degraded
+    assert not throttled.degraded, "one failure must not read as an outage"
+
+    for _ in range(2):
+        throttled._next_allowed = 0.0
+        throttled.recognize(np.zeros(8), 8000)
+    assert throttled.degraded, "a recogniser that stopped answering must say so"
 
 
 def test_recovery_clears_the_penalty() -> None:
     inner = _Recorder(TimeoutError("no answer"))
-    throttled = Throttled(inner, min_interval=0.0)
-    throttled.recognize(np.zeros(8), 8000)
+    throttled = Throttled(inner, min_interval=0.0, open_after=2)
+    for _ in range(2):
+        throttled._next_allowed = 0.0
+        throttled.recognize(np.zeros(8), 8000)
     assert throttled.degraded
 
     inner.outcome = Recognition(artist="Foreigner", title="Cold as Ice")

@@ -37,28 +37,69 @@ class Recognizer(Protocol):
     def close(self) -> None: ...
 
 
+# Consecutive failures before the external recogniser is left alone entirely.
+OPEN_AFTER_ERRORS = 4
+
+# How long to stop calling it for once that happens. The local index keeps
+# working throughout, so the cost of waiting is only the songs it has not
+# learned yet -- far less than the cost of blocking on a service that is down.
+COOL_OFF_SECONDS = 900.0
+
+
 class Throttled:
-    """Wraps a recogniser with a minimum call interval and failure backoff.
+    """Wraps a recogniser with pacing, failure backoff, and a circuit breaker.
 
     The external recogniser is a shared, unmetered service we do not own. The
     local index already absorbs repeats, so calls should be occasional -- this
     makes that a guarantee rather than a hope.
+
+    The circuit breaker is the part that matters when things go wrong. A service
+    that refuses fast is harmless; one that accepts the connection and never
+    answers is not, because the caller pays the full timeout every time. Left to
+    grind, that is what turned a twenty-minute window into a seven-hour one.
+    After a few consecutive failures the recogniser is dropped for a spell and
+    every lookup returns immediately, so the analyser keeps moving on the local
+    index instead of queueing behind a service that is not going to reply.
+
+    Only the healthy pacing interval sleeps. Backoff and cool-off return at once:
+    making the analyser wait out a penalty it cannot shorten just moves the
+    stall from the recogniser into the scan.
     """
 
-    def __init__(self, inner: Recognizer, min_interval: float = 3.0, max_backoff: float = 120.0):
+    def __init__(
+        self,
+        inner: Recognizer,
+        min_interval: float = 3.0,
+        max_backoff: float = 120.0,
+        open_after: int = OPEN_AFTER_ERRORS,
+        cool_off: float = COOL_OFF_SECONDS,
+    ):
         self.inner = inner
         self.name = inner.name
         self.min_interval = min_interval
         self.max_backoff = max_backoff
+        self.open_after = open_after
+        self.cool_off = cool_off
         self._next_allowed = 0.0
         self._consecutive_errors = 0
         self.calls = 0
+        self.skipped = 0
+
+    @property
+    def degraded(self) -> bool:
+        """True when lookups are failing, so callers can stop asking twice."""
+        return self._consecutive_errors > 0
 
     def recognize(self, samples: np.ndarray, rate: int) -> Recognition | None:
         import time
 
-        wait = self._next_allowed - time.monotonic()
+        now = time.monotonic()
+        wait = self._next_allowed - now
         if wait > 0:
+            if self._consecutive_errors:
+                # Penalty time. Answer now and let the local index carry it.
+                self.skipped += 1
+                return None
             time.sleep(wait)
 
         self.calls += 1
@@ -66,11 +107,21 @@ class Throttled:
             result = self.inner.recognize(samples, rate)
         except Exception as exc:
             self._consecutive_errors += 1
-            delay = min(self.min_interval * 2**self._consecutive_errors, self.max_backoff)
-            log.warning("recogniser error (%s); backing off %.0fs", exc, delay)
-            self._next_allowed = time.monotonic() + delay
+            if self._consecutive_errors >= self.open_after:
+                log.error(
+                    "%s has failed %d times in a row (%s); leaving it alone for"
+                    " %.0f min and relying on the local index",
+                    self.name, self._consecutive_errors, exc, self.cool_off / 60,
+                )
+                self._next_allowed = time.monotonic() + self.cool_off
+            else:
+                delay = min(self.min_interval * 2**self._consecutive_errors, self.max_backoff)
+                log.warning("recogniser error (%s); backing off %.0fs", exc, delay)
+                self._next_allowed = time.monotonic() + delay
             return None
 
+        if self._consecutive_errors:
+            log.info("%s is answering again", self.name)
         self._consecutive_errors = 0
         self._next_allowed = time.monotonic() + self.min_interval
         return result

@@ -256,6 +256,9 @@ class Analyzer:
         self.external_calls += 1
         return self.recognizer.recognize(probe, RECOGNIZE_RATE)
 
+    def _recognizer_degraded(self) -> bool:
+        return bool(getattr(self.recognizer, "degraded", False))
+
     def _expected_ms(self, key: str) -> int | None:
         """How long this song is supposed to run, per iTunes/Deezer."""
         row = db.get_song_meta(self.conn, key)
@@ -387,10 +390,14 @@ class Analyzer:
             )
 
         found = self._external(window, at_ms)
-        if found is None:
+        if found is None and not self._recognizer_degraded():
             # The same song can match at one offset and miss at another, so a
             # single miss is not evidence of silence. Shift along and ask again
             # before writing the stretch off.
+            #
+            # Only worth doing while the recogniser is actually answering. When
+            # it is not, asking twice more turns every probe into three dead
+            # calls, and the scan pays the timeout three times over for nothing.
             for retry in RETRY_OFFSETS_MS:
                 if not window.covers(at_ms + retry):
                     break

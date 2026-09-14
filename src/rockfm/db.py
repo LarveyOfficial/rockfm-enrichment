@@ -69,8 +69,12 @@ CREATE TABLE IF NOT EXISTS fp_tracks (
     artist      TEXT,
     source      TEXT,               -- preview|broadcast|repetition
     occurrences INTEGER NOT NULL DEFAULT 0,
-    duration_ms INTEGER,
+    duration_ms INTEGER,            -- release length, from iTunes/Deezer
     anchor_ms   INTEGER,            -- broadcast ms corresponding to reference offset 0
+    -- 1 once the reference spans a whole aired song anchored at its start, which
+    -- is what makes a match offset mean "elapsed within the song".
+    song_anchored INTEGER NOT NULL DEFAULT 0,
+    learned_ms  INTEGER,            -- length of the span actually learned
     created_ms  INTEGER NOT NULL,
     updated_ms  INTEGER NOT NULL
 );
@@ -105,6 +109,25 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+# Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS does
+# nothing to a database that already exists, so anything added later has to be
+# listed here as well as in SCHEMA above, or an upgrade silently keeps the old
+# shape and the new code fails on a missing column.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("fp_tracks", "song_anchored", "INTEGER NOT NULL DEFAULT 0"),
+    ("fp_tracks", "learned_ms", "INTEGER"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, definition in MIGRATIONS:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not columns:
+            continue  # fresh database; SCHEMA already created it correctly
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=30.0, isolation_level=None)
@@ -113,6 +136,7 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

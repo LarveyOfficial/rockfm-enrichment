@@ -53,7 +53,26 @@ log = logging.getLogger("rockfm.analyzer")
 RECOGNIZE_RATE = 16000
 PROBE_MS = 12_000          # fixed by Shazam's signature format
 STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
-BISECT_LIMIT_MS = 2_000    # boundary precision we stop refining at
+# Bisection never calls the external recogniser -- it queries our own index --
+# so it is not bound by Shazam's sample length. Measured against a reference
+# learned from the same broadcast audio, a 2 s probe still matched 100% of the
+# time and reported its position to within 0.016 s, so the probe can be short.
+# That matters: the boundary correction is half the probe length, so a 12 s
+# probe put a six second guess into every edge.
+BISECT_PROBE_MS = 2_000
+BISECT_MIN_VOTES = 5
+# Offset-derived start estimates should agree closely; if they scatter, the
+# reference is not trustworthy and bisection is the safer answer.
+OFFSET_AGREEMENT_MS = 4_000
+# Where to look again when a probe comes back empty, before concluding there is
+# no song there.
+RETRY_OFFSETS_MS = (5_000, 10_000)
+# How far a run may stray from the release length before we distrust it.
+DURATION_DISAGREEMENT = 0.35
+# How far an offset-derived start may sit from the edge we searched for before
+# we distrust it and keep the searched one.
+OFFSET_TRUST_MS = 15_000
+BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
 # Windows must comfortably hold several songs. At five minutes a single track
 # fills one, so its boundaries land on the window edges instead of being found
@@ -219,11 +238,53 @@ class Analyzer:
         value = row["duration_ms"] if row else None
         return int(value) if value else None
 
+    def _edge_match(self, window: Window, at_ms: int, key: str) -> bool:
+        """Is this short probe still `key`? Used only for locating boundaries."""
+        probe = window.probe8(at_ms, BISECT_PROBE_MS)
+        if probe.size == 0:
+            return False
+        match = self.index.match(
+            fingerprint.compute(probe), kind="music", min_votes=BISECT_MIN_VOTES
+        )
+        return match is not None and match.key == key
+
     def _same_track(
         self, window: Window, at_ms: int, key: str, min_score: float = MIN_LOCAL_SCORE
     ) -> bool:
         match = self._local(window, at_ms, min_score)
         return match is not None and match.key == key
+
+    def _start_from_offsets(self, window: Window, run: Run) -> int | None:
+        """Where the song started, read straight off the match offsets.
+
+        Once a reference is anchored at a song's start, a match reports how far
+        into the song the probe was -- measured accurate to about one frame. So
+        every probe in the run independently says where the song began, and the
+        median of them beats any binary search. Only works from a song's second
+        airing on; the first has nothing anchored to measure against.
+        """
+        if run.label is None:
+            return None
+        track = self.index.get(run.label.track_id)
+        if track is None or not track["song_anchored"]:
+            return None
+
+        estimates: list[int] = []
+        position = run.first_ms
+        while position <= run.last_ms and window.covers(position):
+            match = self._local(window, position)
+            if match is not None and match.key == run.key:
+                estimates.append(position - int(match.offset_seconds * 1000))
+            position += STEP_MS
+        if len(estimates) < 3:
+            return None
+
+        estimates.sort()
+        spread = estimates[-1] - estimates[0]
+        if spread > OFFSET_AGREEMENT_MS:
+            log.debug("offset estimates disagree by %.1fs; falling back", spread / 1000)
+            return None
+        return estimates[len(estimates) // 2]
 
     # --- committing ---
 
@@ -297,11 +358,21 @@ class Analyzer:
                 artist=match.artist or "",
                 title=match.title or "",
                 source="local",
-                confidence=min(1.0, match.score * 4),
+                confidence=_confidence(match),
                 track_id=match.track_id,
             )
 
         found = self._external(window, at_ms)
+        if found is None:
+            # The same song can match at one offset and miss at another, so a
+            # single miss is not evidence of silence. Shift along and ask again
+            # before writing the stretch off.
+            for retry in RETRY_OFFSETS_MS:
+                if not window.covers(at_ms + retry):
+                    break
+                found = self._external(window, at_ms + retry)
+                if found is not None:
+                    break
         if found is None:
             return None
         key = catalog_key(found.artist, found.title)
@@ -327,45 +398,65 @@ class Analyzer:
             track_id=track_id,
         )
 
-    def _boundary(self, window: Window, earlier: Run, later: Run) -> int:
-        """Locate the transition between two consecutive runs.
-
-        Bisects for the last probe start that is still mostly the outgoing
-        track, then adds half a probe length: a 12 s probe stops being "mostly A"
-        roughly six seconds before A actually ends.
-        """
-        if earlier.key is None:
-            if later.key is None:
-                return later.first_ms
-            # Nothing identifiable before, a song after: find where the song
-            # starts by searching backwards for the earliest probe that is
-            # still it. Without this a track coming out of an advert break just
-            # snapped to the next scan position, up to a step late.
-            low, high = earlier.last_ms, later.first_ms
-            while high - low > BISECT_LIMIT_MS:
-                middle = (low + high) // 2
-                if not window.covers(middle):
-                    break
-                if self._same_track(window, middle, later.key, EDGE_MIN_SCORE):
-                    high = middle
-                else:
-                    low = middle
-            # The earliest probe that reads as the new song begins half a probe
-            # before the song itself does, so the boundary sits half a probe
-            # after that -- the mirror of the rule used for endings below.
-            return max(high + PROBE_MS // 2, earlier.first_ms)
-
-        key = earlier.key
-        low, high = earlier.last_ms, later.first_ms
+    def _last_match(self, window: Window, low: int, high: int, key: str) -> int:
+        """Latest position in [low, high] that still reads as `key`."""
         while high - low > BISECT_LIMIT_MS:
             middle = (low + high) // 2
-            if not window.covers(middle):
+            if not window.covers(middle, BISECT_PROBE_MS):
                 break
-            if self._same_track(window, middle, key, EDGE_MIN_SCORE):
+            if self._edge_match(window, middle, key):
                 low = middle
             else:
                 high = middle
-        return min(low + PROBE_MS // 2, later.first_ms + PROBE_MS)
+        return low
+
+    def _first_match(self, window: Window, low: int, high: int, key: str) -> int:
+        """Earliest position in [low, high] that reads as `key`."""
+        while high - low > BISECT_LIMIT_MS:
+            middle = (low + high) // 2
+            if not window.covers(middle, BISECT_PROBE_MS):
+                break
+            if self._edge_match(window, middle, key):
+                high = middle
+            else:
+                low = middle
+        return high
+
+    def _boundary(self, window: Window, earlier: Run, later: Run) -> int:
+        """Where one run gives way to the next.
+
+        Both edges are located, not one: the last moment the outgoing song can
+        still be heard and the first the incoming song can. On a hard cut those
+        coincide. Across a crossfade they do not -- both songs are genuinely
+        present for a few seconds -- and the honest boundary is the middle of
+        that overlap rather than an edge picked arbitrarily from one side.
+
+        A probe starting at t covers the next BISECT_PROBE_MS, so it stops
+        reading as the outgoing song about half a probe before the change; half
+        a probe is added back. With a two second probe that correction is one
+        second, where the twelve second probe this used to take made it six.
+        """
+        low, high = earlier.last_ms, later.first_ms
+        correction = BISECT_PROBE_MS // 2
+
+        if earlier.key is None and later.key is None:
+            return later.first_ms
+        if earlier.key is None:
+            return max(self._first_match(window, low, high, later.key) + correction,
+                       earlier.first_ms)
+        if later.key is None:
+            return min(self._last_match(window, low, high, earlier.key) + correction,
+                       later.first_ms + PROBE_MS)
+
+        last_outgoing = self._last_match(window, low, high, earlier.key)
+        first_incoming = self._first_match(window, low, high, later.key)
+        if first_incoming < last_outgoing:
+            log.debug(
+                "crossfade of %.1fs between %s and %s",
+                (last_outgoing - first_incoming) / 1000, earlier.key, later.key,
+            )
+        middle = (last_outgoing + first_incoming) // 2
+        return max(low, min(middle + correction, high + PROBE_MS))
 
     def _scan(self, window: Window) -> list[tuple[int, Label | None]]:
         probes: list[tuple[int, Label | None]] = []
@@ -428,7 +519,12 @@ class Analyzer:
         span = window.probe8(start_ms, end_ms - start_ms)
         if span.size == 0:
             return
-        self.index.replace(run.label.track_id, fingerprint.compute(span), anchor_ms=start_ms)
+        self.index.replace(
+            run.label.track_id,
+            fingerprint.compute(span),
+            anchor_ms=start_ms,
+            learned_ms=end_ms - start_ms,
+        )
 
     def process_window(self, window: Window) -> int:
         """Commit everything in the window and return the new cursor.
@@ -457,6 +553,24 @@ class Analyzer:
         for position in range(len(runs) - 1):
             edges.append(self._boundary(window, runs[position], runs[position + 1]))
         edges.append(window.end_ms)
+
+        # A song heard before can say where it started directly, by reading the
+        # offset off its own match rather than searching for the edge. Measured
+        # accurate to about one frame, so it wins wherever it is available and
+        # broadly agrees with the edge we found. Adjusting the shared edge keeps
+        # the timeline contiguous.
+        for position in range(1, len(runs)):
+            told = self._start_from_offsets(window, runs[position])
+            if told is None:
+                continue
+            if abs(told - edges[position]) > OFFSET_TRUST_MS:
+                log.debug(
+                    "offset start %s disagrees with edge %s by %.1fs; keeping the edge",
+                    told, edges[position], abs(told - edges[position]) / 1000,
+                )
+                continue
+            if edges[position - 1] < told < edges[position + 1]:
+                edges[position] = told
 
         committed = runs[:-1] if len(runs) > 1 else runs
         segments = [
@@ -514,6 +628,19 @@ class Analyzer:
             return
 
         assert run.label is not None
+        confidence = run.label.confidence
+        expected = self._expected_ms(run.key) if run.key else None
+        if expected:
+            drift = abs((end_ms - start_ms) - expected) / expected
+            if drift > DURATION_DISAGREEMENT:
+                # Radio edits are genuinely shorter than the release, so this is
+                # a reason to doubt the boundaries rather than to move them.
+                confidence = round(confidence * 0.6, 3)
+                log.info(
+                    "%s - %s ran %.0fs against a release of %.0fs (%.0f%% out)",
+                    run.label.artist, run.label.title,
+                    (end_ms - start_ms) / 1000, expected / 1000, drift * 100,
+                )
         item = self._enriched(
             Item(
                 start_ms=start_ms,
@@ -521,7 +648,7 @@ class Analyzer:
                 kind=S.KIND_CANCION,
                 title=run.label.title,
                 artist=run.label.artist,
-                confidence=run.label.confidence,
+                confidence=confidence,
                 source=run.label.source,
             )
         )
@@ -580,6 +707,20 @@ class Analyzer:
             return 0
         self.set_cursor(position)
         return advance
+
+
+def _confidence(match: fingerprint.Match) -> float:
+    """How much to trust a local match.
+
+    Raw score alone is misleading: a short probe of a long reference scores low
+    even when it is unmistakably right. What separates a real match from a
+    coincidence is the margin -- how far ahead the winner is of the next best
+    alignment. A handful of votes spread evenly is noise; a hundred votes all
+    agreeing on one offset is not.
+    """
+    by_score = min(1.0, match.score / 0.5)
+    by_margin = min(1.0, match.margin / 5.0)
+    return round(0.4 * by_score + 0.6 * by_margin, 3)
 
 
 def _clock(epoch_ms: int) -> str:

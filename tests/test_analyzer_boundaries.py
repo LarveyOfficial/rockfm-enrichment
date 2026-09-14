@@ -20,6 +20,7 @@ import pytest
 
 from rockfm import db
 from rockfm.analyzer import (
+    BISECT_PROBE_MS,
     MIN_WINDOW_MS,
     PROBE_MS,
     Analyzer,
@@ -72,9 +73,14 @@ def run_analyzer(tmp_path, spans, passes=4):
     def same_track(_window, at_ms, key, min_score=0.0):
         return song_at(spans, at_ms + PROBE_MS // 2) == key
 
+    # Boundary probes are much shorter, which is the whole point of them.
+    def edge_match(_window, at_ms, key):
+        return song_at(spans, at_ms + BISECT_PROBE_MS // 2) == key
+
     committed: list = []
     analyzer._identify = identify
     analyzer._same_track = same_track
+    analyzer._edge_match = edge_match
     analyzer._enriched = lambda item: item
     analyzer._commit = committed.append
     analyzer._relearn = lambda *args: None
@@ -99,7 +105,9 @@ def test_each_song_lands_close_to_its_real_length(tmp_path, played):
     for item in run_analyzer(tmp_path, played):
         if not item.title or item.title not in truth:
             continue
-        assert item.duration_ms / 1000 == pytest.approx(truth[item.title], abs=15)
+        # Short boundary probes should land these far tighter than the twelve
+        # second ones did; five seconds is a deliberately loose ceiling.
+        assert item.duration_ms / 1000 == pytest.approx(truth[item.title], abs=5)
 
 
 def test_items_never_overlap_and_leave_no_holes(tmp_path, played):
@@ -126,3 +134,71 @@ def test_absorb_slivers_folds_a_leading_tail_into_what_follows():
     cleaned = Analyzer._absorb_slivers([(tail, 0, 2_000), (real, 2_000, 200_000)])
     assert len(cleaned) == 1
     assert cleaned[0][1] == 0 and cleaned[0][2] == 200_000
+
+
+# --- match offsets, retries, confidence, duration sanity -------------------
+
+
+def test_confidence_rewards_margin_over_raw_score():
+    """A short probe of a long reference scores low even when unmistakable."""
+    from rockfm.analyzer import _confidence
+    from rockfm.fingerprint import Match
+
+    def match(score, margin):
+        return Match(track_id=1, key="k", kind="music", title="t", artist="a",
+                     votes=100, offset_frames=0, score=score, margin=margin)
+
+    decisive = _confidence(match(score=0.08, margin=40))   # few hashes, no rival
+    ambiguous = _confidence(match(score=0.30, margin=1.1))  # good score, close call
+    assert decisive > ambiguous
+
+
+def test_offset_start_is_ignored_without_an_anchored_reference(tmp_path):
+    """A song's first airing has nothing anchored to measure against."""
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    track_id = analyzer.index.add(
+        kind="music", key="a|b", hashes=[(1, 0), (2, 1)], title="b", anchor_ms=1000
+    )
+    label = Label(key="a|b", artist="a", title="b", source="s",
+                  confidence=1.0, track_id=track_id)
+    run = Run(key="a|b", label=label, first_ms=0, last_ms=100_000)
+    samples = np.zeros(200 * RATE, dtype=np.float32)
+    assert analyzer._start_from_offsets(Window(0, 200_000, samples), run) is None
+
+
+def test_replace_marks_a_reference_song_anchored(tmp_path):
+    analyzer = build(tmp_path)
+    track_id = analyzer.index.add(
+        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=1000
+    )
+    assert analyzer.index.get(track_id)["song_anchored"] == 0
+    analyzer.index.replace(track_id, [(1, 0), (2, 5)], anchor_ms=500, learned_ms=210_000)
+    row = analyzer.index.get(track_id)
+    assert row["song_anchored"] == 1
+    assert row["learned_ms"] == 210_000
+    assert row["anchor_ms"] == 500
+
+
+def test_a_probe_that_comes_back_empty_is_retried_elsewhere(tmp_path):
+    """The same song matches at one offset and misses at another."""
+    from rockfm.analyzer import RETRY_OFFSETS_MS
+    from rockfm.recognize.base import Recognition
+
+    analyzer = build(tmp_path)
+    asked: list[int] = []
+
+    def external(_window, at_ms):
+        asked.append(at_ms)
+        if at_ms < RETRY_OFFSETS_MS[0]:
+            return None
+        return Recognition(artist="Blondie", title="Denis", provider="stub")
+
+    analyzer._external = external
+    analyzer._local = lambda *a, **k: None
+    samples = np.zeros(200 * RATE, dtype=np.float32)
+    found = analyzer._identify(Window(0, 200_000, samples), 0)
+
+    assert found is not None and found.title == "Denis"
+    assert len(asked) > 1, "gave up after a single miss"

@@ -185,7 +185,11 @@ class FingerprintIndex:
         )
 
     def replace(
-        self, track_id: int, hashes: list[tuple[int, int]], anchor_ms: int | None = None
+        self,
+        track_id: int,
+        hashes: list[tuple[int, int]],
+        anchor_ms: int | None = None,
+        learned_ms: int | None = None,
     ) -> None:
         """Swap a reference for a better one.
 
@@ -193,6 +197,10 @@ class FingerprintIndex:
         aired span and replace whatever we had (a 30 s preview, or the single
         probe that first identified it). The broadcast version -- radio edit,
         processing and all -- is what we will hear next time.
+
+        This also marks the reference song-anchored: its offset zero is now the
+        start of the song rather than wherever we happened to first hear it,
+        which is what lets a later match report elapsed position directly.
         """
         self.conn.execute("DELETE FROM fp_hashes WHERE track_id = ?", (track_id,))
         self.conn.executemany(
@@ -200,9 +208,9 @@ class FingerprintIndex:
             [(value, offset, track_id) for value, offset in hashes],
         )
         self.conn.execute(
-            "UPDATE fp_tracks SET anchor_ms = ?, source = 'broadcast', updated_ms = ?"
-            " WHERE id = ?",
-            (anchor_ms, int(time.time() * 1000), track_id),
+            "UPDATE fp_tracks SET anchor_ms = ?, source = 'broadcast', song_anchored = 1,"
+            " learned_ms = ?, updated_ms = ? WHERE id = ?",
+            (anchor_ms, learned_ms, int(time.time() * 1000), track_id),
         )
 
     def anchor_ms(self, track_id: int) -> int | None:
@@ -213,6 +221,9 @@ class FingerprintIndex:
 
     def find(self, key: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM fp_tracks WHERE key = ?", (key,)).fetchone()
+
+    def get(self, track_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM fp_tracks WHERE id = ?", (track_id,)).fetchone()
 
     def bump(self, track_id: int) -> None:
         self.conn.execute(

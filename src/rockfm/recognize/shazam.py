@@ -6,12 +6,19 @@ sit within Shazam's terms -- which is exactly why the local fingerprint index
 does the heavy lifting and this is only consulted for audio we have not learned
 yet.
 
-IMPORTANT: `SearchParams(segment_duration_seconds=12)` is not optional. Shazam's
-signature format is built around a 12-second sample, and its backend rejects
-signatures generated from any other length. Measured against a known track, 12 s
-matched both a clean official preview and an off-air capture, while the library
-default and every other value (3/5/10/20/30 s) returned no match at all. Do not
-"tune" this number.
+IMPORTANT: `SearchParams(segment_duration_seconds=...)` must be set. The library
+default produces signatures Shazam does not match, so leaving it off means every
+lookup silently returns nothing.
+
+There is a ceiling, not a magic number. Measured against three well-known
+tracks, every length from 4 s to 14 s matched and 16 s and 20 s did not, so
+Shazam accepts up to somewhere between 14 and 16 seconds. Shorter signatures
+carry less evidence and fail sooner on obscure material -- an earlier reading of
+this, taken from a single hard-to-match garage rock track where only 12 s
+worked, wrongly concluded that 12 was the only accepted value.
+
+12 s is used because it is the most evidence Shazam will take, which matters for
+exactly the deep cuts this station plays.
 """
 
 from __future__ import annotations

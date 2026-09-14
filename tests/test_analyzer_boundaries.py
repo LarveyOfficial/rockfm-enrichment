@@ -463,3 +463,56 @@ def test_extension_never_reaches_for_the_network(tmp_path):
 
     assert run.last_ms > 120_000, "the run never reached out"
     assert calls == []
+
+
+def _gate_analyzer(tmp_path, verdict):
+    """An analyzer whose local index never answers, so every probe goes out."""
+    analyzer = build(tmp_path)
+    analyzer._local = lambda _w, at, min_score=0.0: None
+    analyzer._gate = type("G", (), {"classify": lambda _s, _p, _r: verdict})()
+    return analyzer
+
+
+def test_speech_is_not_sent_to_a_music_recogniser(tmp_path):
+    """Three network calls to ask whether presenter talk is a song.
+
+    On a talk-led morning show that is most of the probes in a window, and it
+    is why the scan fell behind the stream feeding it: each probe covered 24s
+    of audio and took 27s to do it.
+    """
+    from rockfm.classify.segmenter import MUSIC, SPEECH
+
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    speech = _gate_analyzer(tmp_path, SPEECH)
+    calls: list[int] = []
+    speech._external = lambda _w, at: calls.append(at)
+    assert speech._identify(window, 60_000) is None
+    assert calls == [], "talk was sent to a music recogniser"
+
+    # Anything the gate does not call speech must still go out, retries and all.
+    music = _gate_analyzer(tmp_path, MUSIC)
+    heard: list[int] = []
+
+    def external(_w, at):
+        heard.append(at)
+        return None
+
+    music._external = external
+    assert music._identify(window, 60_000) is None
+    assert len(heard) > 1
+
+
+def test_the_speech_gate_can_be_turned_off(tmp_path):
+    from rockfm import settings
+    from rockfm.classify.segmenter import SPEECH
+
+    analyzer = _gate_analyzer(tmp_path, SPEECH)
+    settings.save(analyzer.conn, {"skip_lookups_for_speech": False})
+
+    calls: list[int] = []
+    analyzer._external = lambda _w, at: calls.append(at)
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer._identify(Window(0, MIN_WINDOW_MS, samples), 60_000)
+    assert calls != []

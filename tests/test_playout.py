@@ -35,10 +35,14 @@ def test_playlist_is_unavailable_until_the_buffer_fills(client):
     assert client.get("/hls/chunks.m3u8").status_code == 503
 
 
-def test_health_reports_unhealthy_with_an_empty_buffer(client):
+def test_health_is_ok_while_the_buffer_is_still_filling(client):
+    """A six-hour fill is the design working, not a sick container."""
     response = client.get("/api/health")
-    assert response.status_code == 503
-    assert response.json()["ok"] is False
+    payload = response.json()
+    assert payload["state"] == "empty"
+    assert payload["playout_ready"] is False
+    # Nothing has been recorded at all here, so ingest really is down.
+    assert payload["ok"] is False
 
 
 def test_nowplaying_is_valid_even_with_nothing_recorded(client):
@@ -62,3 +66,31 @@ def test_nowplaying_reports_the_source_timezone(client):
     payload = client.get("/api/nowplaying").json()
     assert payload["source_timezone"] == "Europe/Madrid"
     assert payload["source_time"].endswith(("+02:00", "+01:00"))
+
+
+def test_filling_is_reported_as_a_state_with_a_countdown(tmp_path):
+    """Recording, but the delay has not elapsed yet: healthy, not ready."""
+    import time
+
+    from rockfm import db as database
+    from rockfm.playout import Playout
+
+    config = Config(data_dir=tmp_path, delay_seconds_override=6 * 3600)
+    config.ensure_dirs()
+    playout = Playout(config)
+    now_ms = int(time.time() * 1000)
+    for index in range(5):
+        database.insert_segment(
+            playout.conn, pdt_ms=now_ms - 30_000 + index * 6000, seq=index,
+            duration_ms=6000, relpath=f"{index}.aac", size=1, fetched_ms=0,
+        )
+
+    state, remaining = playout.buffer_state()
+    assert state == "filling"
+    # Six hours of delay, half a minute recorded: just under six hours to go.
+    assert 6 * 3600 - 120 < remaining <= 6 * 3600
+
+    health = playout.health()
+    assert health["ok"] is True
+    assert health["playout_ready"] is False
+    assert health["state"] == "filling"

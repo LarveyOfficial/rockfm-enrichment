@@ -38,6 +38,8 @@ ES: Final[dict[str, str]] = {
     "programa.secondary_fallback": "En directo",
     "now_playing": "Sonando ahora",
     "next": "A continuación",
+    "filling": "Rellenando el búfer",
+    "filling.ready_in": "listo en",
 }
 
 EN: Final[dict[str, str]] = {
@@ -51,6 +53,8 @@ EN: Final[dict[str, str]] = {
     "programa.secondary_fallback": "Live",
     "now_playing": "Now playing",
     "next": "Up next",
+    "filling": "Filling the buffer",
+    "filling.ready_in": "ready in",
 }
 
 TABLES: Final[dict[str, dict[str, str]]] = {"es": ES, "en": EN}

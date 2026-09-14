@@ -157,6 +157,7 @@ class Playout:
         upcoming = db.timeline_after(self.conn, position)
         earliest = db.earliest_segment(self.conn)
         latest = db.latest_segment(self.conn)
+        state, remaining = self.buffer_state()
         return {
             "station": {"name": S.STATION_NAME, "language": self.config.display_language},
             "delay_seconds": self.delay.current,
@@ -168,6 +169,8 @@ class Playout:
             "now_playing": self._describe(current, position),
             "next": self._describe(upcoming, position) if upcoming else None,
             "buffer": {
+                "state": state,
+                "seconds_until_ready": remaining,
                 "segments": db.segment_count(self.conn),
                 "earliest": _iso(earliest["pdt_ms"]) if earliest else None,
                 "latest": _iso(latest["pdt_ms"]) if latest else None,
@@ -179,17 +182,38 @@ class Playout:
             },
         }
 
+    def buffer_state(self) -> tuple[str, float | None]:
+        """Where we are between a cold start and being able to play.
+
+        A fresh install has nothing to play until the buffer spans the whole
+        delay -- six hours, by default. That is the design working, not a
+        fault, so it gets its own state rather than looking like a failure.
+        """
+        position = self.position_ms()
+        if db.segment_at(self.conn, position) is not None:
+            return "ready", 0.0
+        earliest = db.earliest_segment(self.conn)
+        if earliest is None:
+            return "empty", None
+        if position < earliest["pdt_ms"]:
+            return "filling", (earliest["pdt_ms"] - position) / 1000
+        return "stalled", None
+
     def health(self) -> dict:
         latest = db.latest_segment(self.conn)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         lag = (now_ms - latest["pdt_ms"]) / 1000 if latest else None
-        position = self.position_ms()
-        playable = db.segment_at(self.conn, position) is not None
-        healthy = bool(latest) and lag is not None and lag < 120 and playable
+        state, remaining = self.buffer_state()
+        # Health tracks whether we are recording, not whether the delay has
+        # elapsed yet. Reporting failure throughout a six-hour fill would have
+        # every orchestrator calling a perfectly healthy container sick.
+        ingesting = lag is not None and lag < 120
         return {
-            "ok": healthy,
+            "ok": ingesting and state in {"ready", "filling", "empty"},
+            "state": state,
             "ingest_lag_seconds": lag,
-            "playout_ready": playable,
+            "playout_ready": state == "ready",
+            "seconds_until_ready": remaining,
             "segments": db.segment_count(self.conn),
             "delay_seconds": self.delay.current,
         }
@@ -362,7 +386,15 @@ async function refresh() {
     set('kind', np.kind === 'cancion' ? '' : (np.kind || ''));
     const art = document.getElementById('art');
     const wanted = np.art || '';
-    if (art.getAttribute('src') !== wanted) art.setAttribute('src', wanted);
+    // An <img> with an empty src renders a broken-image icon, so drop the
+    // attribute entirely and let the placeholder background show through.
+    if (wanted) {
+      if (art.getAttribute('src') !== wanted) art.setAttribute('src', wanted);
+      art.hidden = false;
+    } else {
+      art.removeAttribute('src');
+      art.hidden = true;
+    }
     set('elapsed', mmss(np.elapsed));
     set('duration', mmss(np.duration));
     document.getElementById('fill').style.width =
@@ -373,6 +405,19 @@ async function refresh() {
     const madrid = new Date(data.source_time).toLocaleTimeString('es-ES', {
       hour: '2-digit', minute: '2-digit', timeZone: data.source_timezone || 'Europe/Madrid',
     });
+    const buf = data.buffer || {};
+    if (buf.state === 'filling' || buf.state === 'empty') {
+      const left = Math.max(0, Math.round((buf.seconds_until_ready || 0) / 60));
+      const hours = Math.floor(left / 60), mins = left % 60;
+      set('primary', 'Rellenando el búfer');
+      set('secondary', `listo en ${hours ? hours + ' h ' : ''}${mins} min`);
+      set('kind', '');
+      set('elapsed', '--:--');
+      set('duration', '--:--');
+      btn.disabled = true;
+    } else {
+      btn.disabled = false;
+    }
     set('meta', `Diferido ${data.delay_hours} h · en España son las ${madrid}`);
   } catch (err) {
     set('meta', 'sin conexión con el servidor');

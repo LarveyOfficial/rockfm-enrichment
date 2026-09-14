@@ -86,6 +86,6 @@ def test_the_scanner_would_catch_it() -> None:
     assert not unterminated_strings("const ok = confirm(`first\nsecond`);")
 
 
-@pytest.mark.parametrize("marker", ("<script>", "</script>", "id=\"reset\""))
+@pytest.mark.parametrize("marker", ("<script>", "</script>", "id=\"reanalyze\""))
 def test_the_page_still_carries_its_parts(marker: str) -> None:
     assert marker in DASHBOARD_HTML

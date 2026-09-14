@@ -192,3 +192,53 @@ def test_two_airings_of_one_song_stay_two_rows(tmp_path):
 
     rows = list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
     assert len(rows) == 2
+
+
+# --- "we could not look" is not "we looked and found nothing" ---------------
+
+
+def _window_of_silence():
+    import numpy as np
+
+    from rockfm.analyzer import MIN_WINDOW_MS, Window
+
+    RATE = 8000
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    return Window(0, MIN_WINDOW_MS, samples)
+
+
+def _unidentifiable(tmp_path, degraded: bool):
+    analyzer = build(tmp_path)
+    analyzer._identify = lambda _w, at, **_kw: None
+    analyzer._recognizer_degraded = lambda: degraded
+    analyzer._programme = lambda _at: None
+    return analyzer
+
+
+def test_audio_nobody_could_ask_about_is_held_not_named(tmp_path):
+    """A recogniser outage must not be written into the timeline as fact.
+
+    Guns N' Roses ran for two minutes under a stretch labelled as the
+    programme, because every probe came back empty while the recogniser was
+    refusing calls -- indistinguishable, at the point of commit, from audio
+    with no song in it.
+    """
+    analyzer = _unidentifiable(tmp_path, degraded=True)
+    window = _window_of_silence()
+
+    position = analyzer.process_window(window)
+
+    assert analyzer.conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 0
+    # The cursor stays put, so the next pass looks again.
+    assert position == window.start_ms
+
+
+def test_the_same_audio_is_named_when_the_recogniser_was_working(tmp_path):
+    """Held only while we could not ask. Having asked, an empty answer is real."""
+    analyzer = _unidentifiable(tmp_path, degraded=False)
+    window = _window_of_silence()
+
+    position = analyzer.process_window(window)
+
+    assert analyzer.conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] > 0
+    assert position > window.start_ms

@@ -233,6 +233,9 @@ class Analyzer:
         # probe extent -- so planning must not overwrite it with the worse one.
         self._settled: set[str] = set()
         self._grounded: set[str] = set()
+        # Set when a window ends with audio nobody could identify because the
+        # recogniser was down. The cursor stops there rather than past it.
+        self._held = False
         # Pure numpy, ~0.2ms per probe. Deliberately not the CNN: this runs on
         # every probe that misses locally, and it only has to be right when it
         # is certain.
@@ -910,6 +913,7 @@ class Analyzer:
         self._learned.clear()
         self._settled.clear()
         self._grounded.clear()
+        self._held = False
         total = self._probe_count(window)
         emitted_to = window.start_ms
         position = window.start_ms
@@ -926,7 +930,14 @@ class Analyzer:
             if settled > emitted_to:
                 emitted_to = self._publish(window, probes, emitted_to, settled)
 
-        self._publish(window, probes, emitted_to, None)
+        emitted_to = self._publish(window, probes, emitted_to, None)
+
+        # Held audio is unfinished business. Leaving the cursor short of it
+        # means the next pass looks again, by which time the recogniser has
+        # usually recovered -- and with hours of buffer in hand, waiting costs
+        # nothing that writing the wrong answer would not cost more.
+        if self._held:
+            return emitted_to
 
         runs = self._group(probes)
         if len(runs) > 1:
@@ -942,11 +953,26 @@ class Analyzer:
         emitted_to: int,
         settled_before: int | None,
     ) -> int:
-        """Commit every planned item that is finished and not already written."""
+        """Commit every planned item that is finished and not already written.
+
+        Except anything unnamed while the recogniser is down. A stretch nobody
+        could identify looks exactly like a stretch with no song in it, and the
+        difference is the whole meaning of the item: one is the programme, the
+        other is a song we failed to ask about. Committing the first when it was
+        really the second writes the failure into the timeline as fact, and the
+        cursor moves past it, so it is never revisited.
+        """
         for run, start_ms, end_ms in self._plan(window, probes):
             if start_ms < emitted_to:
                 continue
             if settled_before is not None and end_ms > settled_before:
+                break
+            if run.key is None and self._recognizer_degraded():
+                log.info(
+                    "holding %.0fs at %s: the recogniser is down and this may be a song",
+                    (end_ms - start_ms) / 1000, _clock(start_ms),
+                )
+                self._held = True
                 break
             self._commit_run(window, run, start_ms, end_ms)
             emitted_to = end_ms

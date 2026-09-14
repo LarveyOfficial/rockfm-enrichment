@@ -15,6 +15,10 @@ from pathlib import Path
 # Where the analyzer has read up to. Kept here rather than in analyzer.py so the
 # web process can report progress without importing the numeric stack.
 ANALYZER_CURSOR_KEY = "analyzer_cursor_ms"
+# The cursor is only written once a whole window is done, and a cold first pass
+# takes minutes -- long enough to look broken. These say what it is up to.
+ANALYZER_STATE_KEY = "analyzer_state"
+ANALYZER_HEARTBEAT_KEY = "analyzer_heartbeat_ms"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (

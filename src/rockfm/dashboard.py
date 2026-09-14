@@ -183,8 +183,11 @@ function renderChips() {
   const out = [
     chip('ingest lag', lag == null ? '–' : lag.toFixed(0) + 's', lagLevel),
     chip('buffer', hhmm(b.seconds)),
-    chip('analyzer behind', behind == null ? '–' : hhmm(behind),
-         behind == null ? 'warn' : behind < 900 ? '' : 'warn'),
+    chip('analyzer', a.state === 'scanning' ? 'scanning…'
+         : a.state === 'waiting' ? 'waiting for audio'
+         : behind == null ? 'starting…' : 'behind ' + hhmm(behind),
+         a.last_active_seconds != null && a.last_active_seconds > 600 ? 'bad'
+         : behind != null && behind > 900 ? 'warn' : ''),
     chip('segments', c.segments),
     chip('songs found', c.songs),
     chip('learned', c.learned_songs),

@@ -64,6 +64,10 @@
           Description="ina uses a trained CNN and is accurate but needs about 1 GB of RAM. light is dependency-free and abstains when unsure."
           Type="Variable" Display="advanced" Required="false" Mask="false">ina</Config>
 
+  <Config Name="Min Non-Music Seconds" Target="MIN_NONMUSIC_SECONDS" Default="5"
+          Description="Non-song stretches shorter than this are left alone rather than being called an advert or presenter talk. Station jingles run about two seconds and fit no useful category."
+          Type="Variable" Display="advanced" Required="false" Mask="false">5</Config>
+
   <Config Name="Display Language" Target="DISPLAY_LANGUAGE" Default="es"
           Description="Language for advert, news and programme labels. es or en."
           Type="Variable" Display="advanced" Required="false" Mask="false">es</Config>

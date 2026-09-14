@@ -2,7 +2,7 @@
 
 Four signals, fused:
 
-  repetition  heard before -> advert or ident; genuinely new -> live talk
+  repetition  heard before -> advert; genuinely new -> live talk
   speech/music  keeps an unrecognised *song* from being labelled as talk
   schedule    which programme is on air, its presenters and artwork
   clock       news bulletins cluster at the top of the hour; the overnight
@@ -12,6 +12,11 @@ When the signals do not agree, prefer the vaguer label that is still true: name
 the programme rather than guess "Publicidad". A listener seeing the right show
 name during an advert is a much smaller error than seeing "Publicidad" while the
 presenter is talking.
+
+Very short stretches are left alone entirely. Station jingles run about two
+seconds between tracks, and no useful verdict fits them -- they are not adverts
+and nobody is talking. Anything below `MIN_NONMUSIC_SECONDS` keeps the station
+name rather than being forced into a category it does not belong in.
 """
 
 from __future__ import annotations
@@ -62,6 +67,7 @@ class Classifier:
         self.schedule = schedule or Schedule()
         self.segmenter = segmenter if segmenter is not None else build_segmenter(config.segmenter)
         self.repetition = RepetitionIndex(conn)
+        self.min_nonmusic_ms = int(config.min_nonmusic_seconds * 1000)
 
     # --- helpers ---
 
@@ -103,8 +109,8 @@ class Classifier:
         position = start_ms
         while position < end_ms:
             finish = min(position + CHUNK_MS, end_ms)
-            if finish - position < CHUNK_MS // 3:
-                break
+            if finish - position < self.min_nonmusic_ms:
+                break  # trailing sliver: too short to judge
             samples = self.reader.read(position, finish - position, rate=RATE)
             if samples.size == 0:
                 position = finish
@@ -141,8 +147,6 @@ class Classifier:
 
     def _refine(self, chunk: Chunk) -> Chunk:
         span = chunk.end_ms - chunk.start_ms
-        if chunk.kind == S.KIND_PUBLICIDAD and span <= IDENT_MAX_MS:
-            chunk.kind = S.KIND_SINTONIA
         if chunk.kind == S.KIND_NOTICIAS and span > NEWS_MAX_MS:
             chunk.kind = S.KIND_PROGRAMA
         return chunk
@@ -166,6 +170,25 @@ class Classifier:
                 "confidence": chunk.confidence,
                 "source": "classifier",
                 "cluster_id": chunk.cluster_id,
+            },
+            int(time.time() * 1000),
+        )
+
+    def _commit_short(self, row) -> None:
+        """Retire a sliver without labelling it as anything in particular."""
+        programme = self._programme(row["start_ms"])
+        db.upsert_timeline(
+            self.conn,
+            {
+                "start_ms": row["start_ms"],
+                "end_ms": row["end_ms"],
+                "kind": S.KIND_DESCONOCIDO,
+                "art_url": programme.image_url if programme else None,
+                "show_title": programme.title if programme else None,
+                "show_lead": programme.lead if programme else None,
+                "show_image": programme.image_url if programme else None,
+                "confidence": 0.0,
+                "source": "too-short",
             },
             int(time.time() * 1000),
         )
@@ -198,6 +221,12 @@ class Classifier:
         )
         handled = 0
         for row in rows:
+            if row["end_ms"] - row["start_ms"] < self.min_nonmusic_ms:
+                # A jingle or a gap between tracks. Mark it done so it is not
+                # rescanned every pass, but pass no judgement on it.
+                self._commit_short(row)
+                handled += 1
+                continue
             chunks = [self._refine(c) for c in self._merge(self._chunks(row["start_ms"], row["end_ms"]))]
             if not chunks:
                 continue

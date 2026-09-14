@@ -69,6 +69,12 @@ class Config:
     # --- recognition / classification ---
     recognizer: str = field(default_factory=lambda: _env("RECOGNIZER", "shazamio"))
     segmenter: str = field(default_factory=lambda: _env("SEGMENTER", "ina"))
+    # Non-song stretches shorter than this are not worth a verdict. Station
+    # jingles run a couple of seconds and sit between tracks; calling them
+    # adverts is worse than saying nothing about them.
+    min_nonmusic_seconds: float = field(
+        default_factory=lambda: _float("MIN_NONMUSIC_SECONDS", 5.0)
+    )
     display_language: str = field(default_factory=lambda: _env("DISPLAY_LANGUAGE", "es"))
     seed_on_start: bool = field(default_factory=lambda: _bool("SEED_ON_START", True))
 

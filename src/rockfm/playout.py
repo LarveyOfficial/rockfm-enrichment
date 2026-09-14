@@ -234,6 +234,8 @@ class Playout:
         state, remaining = self.buffer_state()
         cursor_raw = db.get_meta(self.conn, db.ANALYZER_CURSOR_KEY)
         cursor = int(cursor_raw) if cursor_raw else None
+        heartbeat_raw = db.get_meta(self.conn, db.ANALYZER_HEARTBEAT_KEY)
+        heartbeat = int(heartbeat_raw) if heartbeat_raw else None
 
         counts = {
             "segments": db.segment_count(self.conn),
@@ -266,6 +268,8 @@ class Playout:
             },
             "analyzer": {
                 "cursor": cursor,
+                "state": db.get_meta(self.conn, db.ANALYZER_STATE_KEY),
+                "last_active_seconds": (now_ms - heartbeat) / 1000 if heartbeat else None,
                 # How far the analyzer still is from the newest recorded audio.
                 # In steady state this stays small; a growing number means it is
                 # falling behind the recorder.

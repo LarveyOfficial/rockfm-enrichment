@@ -76,13 +76,6 @@ def test_an_unreadable_stretch_falls_back_to_naming_the_show(classifier):
     assert confidence < 0.5
 
 
-def test_short_adverts_are_reclassified_as_idents(classifier):
-    from rockfm.classify.decide import Chunk
-
-    chunk = Chunk(start_ms=0, end_ms=10_000, kind="publicidad", cluster_id=1, confidence=0.8)
-    assert classifier._refine(chunk).kind == "sintonia"
-
-
 def test_a_very_long_news_run_is_really_the_programme(classifier):
     from rockfm.classify.decide import Chunk
 
@@ -103,3 +96,45 @@ def test_merge_joins_adjacent_chunks_of_the_same_kind(classifier):
     assert merged[0].end_ms == 30_000
     assert merged[0].confidence == 0.8
     assert merged[0].cluster_id == 1
+
+
+def test_a_sliver_between_tracks_is_retired_without_a_verdict(classifier):
+    """Station jingles run a couple of seconds; no useful label fits them."""
+    now = 1_700_000_000_000
+    db.upsert_timeline(
+        classifier.conn,
+        {"start_ms": now, "end_ms": now + 2_500, "kind": "desconocido", "source": "unresolved"},
+        0,
+    )
+    assert classifier.run_once() == 1
+
+    row = db.timeline_at(classifier.conn, now + 1_000)
+    assert row["kind"] == "desconocido"
+    assert row["source"] == "too-short"
+    # And it is not rescanned on the next pass.
+    assert classifier.run_once() == 0
+
+
+def test_a_real_break_is_still_classified(classifier, monkeypatch):
+    """Anything past the floor goes through the normal path."""
+    now = 1_700_000_000_000
+    db.upsert_timeline(
+        classifier.conn,
+        {"start_ms": now, "end_ms": now + 90_000, "kind": "desconocido", "source": "unresolved"},
+        0,
+    )
+    seen = []
+    monkeypatch.setattr(classifier, "_chunks", lambda a, b: seen.append((a, b)) or [])
+    classifier.run_once()
+    assert seen == [(now, now + 90_000)]
+
+
+def test_the_floor_is_configurable(tmp_path):
+    from rockfm import db as database
+    from rockfm.config import Config
+
+    config = Config(data_dir=tmp_path, min_nonmusic_seconds=20.0)
+    config.ensure_dirs()
+    conn = database.connect(config.db_path)
+    classifier = Classifier(config, conn, schedule=FakeSchedule(), segmenter=object())
+    assert classifier.min_nonmusic_ms == 20_000

@@ -41,13 +41,14 @@ answer is then learned from the broadcast itself — so a song costs about one
 external call the first time it airs and nothing afterwards. Measured on live
 radio: 16 calls on a cold index, 0 on a warm one over the same audio.
 
-**Adverts vs DJ talk.** Adverts and idents repeat; a presenter talking never
-does. Non-song audio is fingerprinted into a second index, so anything heard
+**Adverts vs DJ talk.** Adverts repeat; a presenter talking never does. Non-song audio is fingerprinted into a second index, so anything heard
 before is an advert or an ident and anything genuinely new is live talk. A
 trained speech/music model keeps an unrecognised *song* from being mistaken for
 talk, and the station's own schedule supplies the programme name and artwork.
 When the signals disagree, the vaguer true label wins: naming the show beats
-guessing "Publicidad".
+guessing "Publicidad". Stretches shorter than `MIN_NONMUSIC_SECONDS` are left
+alone entirely -- station jingles run about two seconds and no verdict fits
+them, so they keep the station name rather than being forced into a category.
 
 **The delay is not a constant.** Spain and the United States change DST on
 different dates, so Madrid→New York is six hours for most of the year and five
@@ -136,6 +137,7 @@ dashboard is useful long before the audio is.
 | `RECOGNIZER` | `shazamio` | or `audd`, `acrcloud` |
 | `SEGMENTER` | `ina` | or `light` for a constrained host |
 | `DISPLAY_LANGUAGE` | `es` | or `en` |
+| `MIN_NONMUSIC_SECONDS` | `5` | Below this, a non-song stretch gets no verdict |
 | `PUBLIC_URL` | — | Makes artwork URLs absolute for AzuraCast |
 
 `DELAY_SECONDS` forces a fixed delay, which is useful for testing — set it to

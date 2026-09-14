@@ -173,6 +173,16 @@ class Analyzer:
     def set_cursor(self, value: int) -> None:
         db.set_meta(self.conn, CURSOR_KEY, str(value))
 
+    def _note(self, state: str) -> None:
+        """Record what the analyzer is doing, for the dashboard.
+
+        A cold first pass probes a whole window before committing anything, so
+        without this the only visible sign of life arrives minutes late and the
+        thing looks dead.
+        """
+        db.set_meta(self.conn, db.ANALYZER_STATE_KEY, state)
+        db.set_meta(self.conn, db.ANALYZER_HEARTBEAT_KEY, str(int(time.time() * 1000)))
+
     # --- identification and boundary refinement ---
 
     def _local(
@@ -442,6 +452,7 @@ class Analyzer:
         start = max(start, available.start_ms)
         limit = available.end_ms - TAIL_GUARD_MS
         if limit - start < PROBE_MS * 2:
+            self._note("waiting")
             return 0
 
         # Wait for a decent block of audio before analysing. Having caught up
@@ -452,6 +463,7 @@ class Analyzer:
         # is no reason to work that way; the only exception is audio close
         # enough to airing that waiting would miss the deadline.
         if limit - start < MIN_WINDOW_MS and not self._must_analyze_now(start):
+            self._note("waiting")
             return 0
 
         end = min(start + WINDOW_MS, limit)
@@ -462,7 +474,9 @@ class Analyzer:
 
         real_end = start + int(samples.size / RECOGNIZE_RATE * 1000)
         window = Window(start, min(end, real_end), samples)
+        self._note("scanning")
         position = self.process_window(window)
+        self._note("idle")
         advance = position - start
         if advance < PROBE_MS:
             # The window held nothing we could resolve yet -- most likely a song

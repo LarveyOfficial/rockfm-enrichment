@@ -9,6 +9,7 @@ so the delayed stream presents as live.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
@@ -291,9 +292,16 @@ class Playout:
             ).fetchone()[0],
         }
 
+        recognizer_raw = db.get_meta(self.conn, db.RECOGNIZER_STATE_KEY)
+        try:
+            recognizer = json.loads(recognizer_raw) if recognizer_raw else None
+        except ValueError:
+            recognizer = None
+
         return {
             "now": now_ms,
             "delay_seconds": self.delay.current,
+            "recognizer": recognizer,
             "source_timezone": self.config.source_tz_name,
             "source_time": source_wallclock(self.config, datetime.now(UTC)).isoformat(),
             "buffer": {

@@ -161,6 +161,11 @@ class Run:
     label: Label | None
     first_ms: int
     last_ms: int
+    # Why extension stopped at each edge. Recorded because the difference
+    # between "the song ended" and "we ran out of ways to ask" is invisible in
+    # the finished timeline, and that is exactly what goes wrong.
+    end_stopped: str = ""
+    start_stopped: str = ""
 
 
 class Window:
@@ -236,6 +241,8 @@ class Analyzer:
         # Set when a window ends with audio nobody could identify because the
         # recogniser was down. The cursor stops there rather than past it.
         self._held = False
+        # Why the edge being extended stopped, filled in as it happens.
+        self._why = ""
         # Pure numpy, ~0.2ms per probe. Deliberately not the CNN: this runs on
         # every probe that misses locally, and it only has to be right when it
         # is certain.
@@ -313,6 +320,31 @@ class Analyzer:
 
     def _recognizer_degraded(self) -> bool:
         return bool(getattr(self.recognizer, "degraded", False))
+
+    def _publish_recognizer_state(self) -> None:
+        """Say how the recogniser is doing, where another process can see it.
+
+        It lives in this process and nothing else can ask it, so a stalled or
+        refusing recogniser is invisible from the dashboard -- which is where
+        the question always gets asked first.
+        """
+        import json
+
+        recognizer = self.recognizer
+        db.set_meta(
+            self.conn,
+            db.RECOGNIZER_STATE_KEY,
+            json.dumps(
+                {
+                    "name": getattr(recognizer, "name", "unknown"),
+                    "degraded": bool(getattr(recognizer, "degraded", False)),
+                    "errors_in_a_row": int(getattr(recognizer, "_consecutive_errors", 0)),
+                    "calls": int(getattr(recognizer, "calls", 0)),
+                    "skipped": int(getattr(recognizer, "skipped", 0)),
+                    "updated_ms": int(time.time() * 1000),
+                }
+            ),
+        )
 
     def _pace_recognizer(self) -> None:
         """Pick up the configured call interval without a restart."""
@@ -738,25 +770,31 @@ class Analyzer:
 
         budget = [EXTEND_EXTERNAL_BUDGET]
         reach = run.last_ms
+        self._why = "limit"
         while reach - run.last_ms < EXTEND_LIMIT_MS:
             candidate = reach + EXTEND_STEP_MS
             if not window.covers(candidate):
+                self._why = "window edge"
                 break
             if not self._continues(window, candidate, run.key, budget):
                 break
             reach = candidate
         run.last_ms = reach
+        run.end_stopped = self._why
 
         budget = [EXTEND_EXTERNAL_BUDGET]
         start = run.first_ms
+        self._why = "limit"
         while run.first_ms - start < EXTEND_LIMIT_MS:
             candidate = start - EXTEND_STEP_MS
             if candidate < window.start_ms or not window.covers(candidate):
+                self._why = "window edge"
                 break
             if not self._continues(window, candidate, run.key, budget):
                 break
             start = candidate
         run.first_ms = start
+        run.start_stopped = self._why
 
     def _continues(
         self, window: Window, at_ms: int, key: str, budget: list[int]
@@ -775,11 +813,21 @@ class Analyzer:
         """
         if self._same_track(window, at_ms, key):
             return True
-        if budget[0] <= 0 or self._recognizer_degraded():
+        if budget[0] <= 0:
+            self._why = "budget"
+            return False
+        if self._recognizer_degraded():
+            self._why = "recogniser down"
             return False
         budget[0] -= 1
         found = self._identify(window, at_ms, retry=False, gate=False)
-        return found is not None and found.key == key
+        if found is None:
+            self._why = "nothing there"
+            return False
+        if found.key != key:
+            self._why = f"became {found.key}"
+            return False
+        return True
 
     def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Teach a span, unless this window already taught one covering it."""
@@ -909,6 +957,7 @@ class Analyzer:
         longer change, so they are committed as we go.
         """
         self._pace_recognizer()
+        self._publish_recognizer_state()
         probes: list[tuple[int, Label | None]] = []
         self._learned.clear()
         self._settled.clear()
@@ -1115,10 +1164,12 @@ class Analyzer:
         self._learn_once(window, run, start_ms, end_ms)
         if run.key:
             self._settled.add(run.key)
+        expected_note = f" of {expected / 1000:.0f}s" if expected else ""
         log.info(
-            "%s  %s - %s  (%.0fs, %s)",
+            "%s  %s - %s  (%.0fs%s, %s)  edges: start=%s end=%s",
             _clock(item.start_ms), item.artist, item.title,
-            item.duration_ms / 1000, item.source,
+            item.duration_ms / 1000, expected_note, item.source,
+            run.start_stopped or "-", run.end_stopped or "-",
         )
 
     def _must_analyze_now(self, start_ms: int) -> bool:

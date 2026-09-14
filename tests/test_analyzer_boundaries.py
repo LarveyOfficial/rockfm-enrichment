@@ -618,3 +618,35 @@ def test_the_budget_can_reach_the_extension_limit(tmp_path):
     )
 
     assert EXTEND_EXTERNAL_BUDGET * EXTEND_STEP_MS >= EXTEND_LIMIT_MS
+
+
+def test_an_edge_records_why_it_stopped(tmp_path):
+    """The finished timeline cannot distinguish "the song ended" from "we ran
+    out of ways to ask", and that difference is exactly what goes wrong."""
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    analyzer._ground_reference = lambda _w, _r: None
+    analyzer._external = lambda _w, at: None
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    def extend(same_track, degraded=False):
+        run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
+        run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
+                          confidence=1.0, track_id=1)
+        analyzer._same_track = same_track
+        analyzer._recognizer_degraded = lambda: degraded
+        analyzer._extend_run(window, run)
+        return run
+
+    # Nothing there, and the recogniser agrees.
+    assert extend(lambda _w, at, key, s=0.0: False).end_stopped == "nothing there"
+
+    # A recogniser that is down must not read as a song that ended.
+    assert extend(
+        lambda _w, at, key, s=0.0: False, degraded=True
+    ).end_stopped == "recogniser down"
+
+    # Walked the whole way and was still going.
+    assert extend(lambda _w, at, key, s=0.0: True).end_stopped == "limit"

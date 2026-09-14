@@ -18,6 +18,9 @@ ANALYZER_CURSOR_KEY = "analyzer_cursor_ms"
 # The cursor is only written once a whole window is done, and a cold first pass
 # takes minutes -- long enough to look broken. These say what it is up to.
 ANALYZER_STATE_KEY = "analyzer_state"
+# Recogniser health, written by the analyzer so the dashboard can see it: the
+# recogniser lives in the analyzer process and nothing else can ask it.
+RECOGNIZER_STATE_KEY = "recognizer_state"
 ANALYZER_HEARTBEAT_KEY = "analyzer_heartbeat_ms"
 ANALYZER_PROGRESS_KEY = "analyzer_progress"   # "done/total" through the window
 

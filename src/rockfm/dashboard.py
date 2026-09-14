@@ -555,11 +555,12 @@ el('auto').onclick = () => {
 el('stop').onclick = stopAudio;
 el('reset').onclick = async () => {
   const ok = confirm(
-    'Throw away the timeline and everything learned from the air, then re-seed?'
-    + '\n\nKept: the recorded audio, the catalogue references, your settings.'
-    + '\nDropped: every song and gap on the timeline, and any reference a'
-    + ' broadcast overwrote.\n\nThe analyzer restarts from the beginning of the'
-    + ' buffer. Nothing stops playing.'
+`Throw away the timeline and everything learned from the air, then re-seed?
+
+Kept: the recorded audio, the catalogue references, your settings.
+Dropped: every song and gap on the timeline, and any reference a broadcast overwrote.
+
+The analyzer restarts from the beginning of the buffer. Nothing stops playing.`
   );
   if (!ok) return;
   const btn = el('reset');

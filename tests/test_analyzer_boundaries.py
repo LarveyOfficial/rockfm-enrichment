@@ -61,7 +61,7 @@ def song_at(spans, ms):
 def run_analyzer(tmp_path, spans, passes=4):
     analyzer = build(tmp_path)
 
-    def identify(_window, at_ms):
+    def identify(_window, at_ms, **_kw):
         name = song_at(spans, at_ms)
         if name is None:
             return None
@@ -249,7 +249,7 @@ def test_items_are_published_during_the_scan_not_only_at_the_end(tmp_path, playe
     seen_at_probe: list[int] = []
     probes = {"n": 0}
 
-    def identify(_window, at_ms):
+    def identify(_window, at_ms, **_kw):
         probes["n"] += 1
         name = song_at(played, at_ms)
         if name is None:
@@ -276,7 +276,7 @@ def test_items_are_published_during_the_scan_not_only_at_the_end(tmp_path, playe
 
 def test_progress_is_recorded_while_scanning(tmp_path, played):
     analyzer = build(tmp_path)
-    analyzer._identify = lambda _w, at: None
+    analyzer._identify = lambda _w, at, **_kw: None
     samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
     analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
 
@@ -291,7 +291,7 @@ def test_a_run_is_only_relearned_when_its_extent_changes(tmp_path, played):
     analyzer = build(tmp_path)
     relearns: list[tuple] = []
 
-    def identify(_window, at_ms):
+    def identify(_window, at_ms, **_kw):
         name = song_at(played, at_ms)
         if name is None:
             return None
@@ -380,7 +380,7 @@ def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
     from rockfm.analyzer import EXTEND_STEP_MS, Run
 
     analyzer = build(tmp_path)
-    analyzer._identify = lambda _w, at: (
+    analyzer._identify = lambda _w, at, **_kw: (
         Label(key=song_at(played, at), artist="x", title="t", source="s",
               confidence=1.0, track_id=1)
         if song_at(played, at) else None
@@ -398,3 +398,58 @@ def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
     assert run.last_ms > true_end - 20_000, "the run never reached out"
     assert run.last_ms <= true_end, "it reached past the end of the song"
     assert true_end - run.last_ms < EXTEND_STEP_MS + 1
+
+
+def test_a_miss_is_only_second_guessed_where_it_costs_something(tmp_path):
+    """Retrying a miss protects the scan; during extension it buys nothing.
+
+    Both extension loops stop on a miss, so the last step of every extension is
+    a miss by design. Asking again at another offset there pays for the same
+    answer three times over -- per song, per edge, against a rate-limited
+    service -- to learn what the first answer already said.
+    """
+    analyzer = build(tmp_path)
+    analyzer._local = lambda _w, at, min_score=0.0: None
+
+    calls: list[int] = []
+
+    def external(_window, at_ms):
+        calls.append(at_ms)
+        return None
+
+    analyzer._external = external
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    assert analyzer._identify(window, 60_000) is None
+    during_scan = len(calls)
+    assert during_scan > 1, "the scan should shift along and ask again"
+
+    calls.clear()
+    assert analyzer._identify(window, 60_000, retry=False) is None
+    assert len(calls) == 1
+
+
+def test_extension_does_not_pay_for_the_miss_that_stops_it(tmp_path, played):
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    analyzer._local = lambda _w, at, min_score=0.0: None
+
+    calls: list[int] = []
+
+    def external(_window, at_ms):
+        calls.append(at_ms)
+        return None
+
+    analyzer._external = external
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    run = Run(key="foreigner", label=None, first_ms=48_000, last_ms=120_000)
+    run.label = Label(key="foreigner", artist="x", title="t", source="s",
+                      confidence=1.0, track_id=1)
+    analyzer._extend_run(window, run)
+
+    # One lookup forwards, one backwards -- not three of each.
+    assert len(calls) == 2

@@ -384,8 +384,14 @@ class Analyzer:
 
     # --- main pass ---
 
-    def _identify(self, window: Window, at_ms: int) -> Label | None:
-        """Name the audio at `at_ms`, independently of any neighbouring probe."""
+    def _identify(self, window: Window, at_ms: int, *, retry: bool = True) -> Label | None:
+        """Name the audio at `at_ms`, independently of any neighbouring probe.
+
+        `retry` is for callers who are asking a question a miss already answers.
+        Shifting along and asking again earns its keep during the scan, where a
+        miss writes off a whole 24s stretch -- but not where the miss is the
+        expected result.
+        """
         match = self._local(window, at_ms)
         if match is not None:
             self.index.bump(match.track_id)
@@ -399,7 +405,7 @@ class Analyzer:
             )
 
         found = self._external(window, at_ms)
-        if found is None and not self._recognizer_degraded():
+        if found is None and retry and not self._recognizer_degraded():
             # The same song can match at one offset and miss at another, so a
             # single miss is not evidence of silence. Shift along and ask again
             # before writing the stretch off.
@@ -541,6 +547,11 @@ class Analyzer:
         cannot confirm the song past what the reference covers. Stepping out in
         six second increments until identification stops costs a handful of
         probes -- local ones, once the song is known -- and removes the bias.
+
+        Both loops stop on a miss, so a miss is the expected outcome of the last
+        step, not a surprise worth a second opinion. Asking again at another
+        offset is how the scan protects a whole 24s stretch from one unlucky
+        probe; here it would only buy the same answer three times.
         """
         if run.key is None:
             return
@@ -550,7 +561,7 @@ class Analyzer:
             candidate = reach + EXTEND_STEP_MS
             if not window.covers(candidate):
                 break
-            found = self._identify(window, candidate)
+            found = self._identify(window, candidate, retry=False)
             if found is None or found.key != run.key:
                 break
             reach = candidate
@@ -561,7 +572,7 @@ class Analyzer:
             candidate = start - EXTEND_STEP_MS
             if candidate < window.start_ms or not window.covers(candidate):
                 break
-            found = self._identify(window, candidate)
+            found = self._identify(window, candidate, retry=False)
             if found is None or found.key != run.key:
                 break
             start = candidate

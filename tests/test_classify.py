@@ -127,3 +127,31 @@ def test_the_floor_is_configurable_at_runtime(tmp_path):
 
     settings.save(conn, {"min_nonmusic_seconds": 20})
     assert classifier.min_nonmusic_ms == 20_000
+
+
+def test_classified_chunks_cover_the_whole_stretch(classifier, monkeypatch):
+    """A leftover shorter than the threshold still has to belong to something.
+
+    Dropping it left a hole at the end of every classified stretch -- and a
+    player shows the previous song through a hole, because nothing tells it
+    otherwise.
+    """
+    import numpy as np
+
+    from rockfm.classify.segmenter import SPEECH
+
+    start, end = 1_700_000_000_000, 1_700_000_036_100  # 36.1s, as seen live
+    class AlwaysSpeech:
+        def classify(self, *_args):
+            return SPEECH
+
+    classifier.segmenter = AlwaysSpeech()
+    monkeypatch.setattr(classifier.reader, "read", lambda a, b, rate=0: np.zeros(b * 16))
+    monkeypatch.setattr(classifier.repetition, "observe", lambda *a: None)
+
+    chunks = classifier._chunks(start, end)
+    assert chunks, "nothing was classified"
+    assert chunks[0].start_ms == start
+    assert chunks[-1].end_ms == end, "left a hole at the end"
+    for earlier, later in zip(chunks, chunks[1:], strict=False):
+        assert later.start_ms == earlier.end_ms

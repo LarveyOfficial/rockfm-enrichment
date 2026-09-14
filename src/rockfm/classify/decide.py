@@ -111,7 +111,13 @@ class Classifier:
         while position < end_ms:
             finish = min(position + CHUNK_MS, end_ms)
             if finish - position < self.min_nonmusic_ms:
-                break  # trailing sliver: too short to judge
+                # Too short to judge on its own, but it still has to belong to
+                # something -- dropping it left a hole at the end of every
+                # stretch we classified, and a player shows the previous song
+                # through a hole.
+                if chunks:
+                    chunks[-1].end_ms = end_ms
+                break
             samples = self.reader.read(position, finish - position, rate=RATE)
             if samples.size == 0:
                 position = finish
@@ -131,6 +137,8 @@ class Classifier:
                 )
             )
             position = finish
+        if chunks and chunks[-1].end_ms < end_ms:
+            chunks[-1].end_ms = end_ms
         return chunks
 
     @staticmethod

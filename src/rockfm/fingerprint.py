@@ -38,6 +38,12 @@ FREQ_MASK = (1 << FREQ_BITS) - 1
 
 DEFAULT_MIN_VOTES = 8
 SQLITE_PARAM_CHUNK = 900
+# Hashes are written in batches rather than one transaction per row or one per
+# song. Per row means tens of thousands of lock acquisitions; one per song holds
+# the write lock for the whole insert, and ingest -- which must store a segment
+# every six seconds or lose it, since upstream keeps only a 24s window -- ends up
+# queued behind it. Batching keeps each hold short and the total count low.
+INSERT_BATCH = 4_000
 
 
 def _spectrogram(samples: np.ndarray) -> np.ndarray:
@@ -155,17 +161,21 @@ class FingerprintIndex:
         track_id = int(row["id"])
         if row["occurrences"] > 1 and self._hash_count(track_id):
             return track_id  # already fingerprinted; just counted another airing
-        # One transaction, not one per row. The connection runs in autocommit,
-        # so an unwrapped executemany of a song's ~70,000 hashes takes the write
-        # lock seventy thousand times -- which with a second writer present
-        # (the catalog seeder) stalls both of them for minutes.
-        with _db.transaction(self.conn):
-            self.conn.executemany(
-                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-                [(value, offset, track_id) for value, offset in hashes],
-            )
+        self._insert_hashes(track_id, hashes)
         del cursor
         return track_id
+
+    def _insert_hashes(
+        self, track_id: int, hashes: list[tuple[int, int]], shift_frames: int = 0
+    ) -> None:
+        """Store hashes in batches, so the write lock is never held for long."""
+        rows = [(value, offset + shift_frames, track_id) for value, offset in hashes]
+        for start in range(0, len(rows), INSERT_BATCH):
+            with _db.transaction(self.conn):
+                self.conn.executemany(
+                    "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
+                    rows[start : start + INSERT_BATCH],
+                )
 
     def _hash_count(self, track_id: int) -> int:
         return int(
@@ -185,11 +195,7 @@ class FingerprintIndex:
         """
         if not hashes:
             return
-        with _db.transaction(self.conn):
-            self.conn.executemany(
-                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-                [(value, offset + shift_frames, track_id) for value, offset in hashes],
-            )
+        self._insert_hashes(track_id, hashes, shift_frames)
 
     def replace(
         self,
@@ -209,15 +215,18 @@ class FingerprintIndex:
         start of the song rather than wherever we happened to first hear it,
         which is what lets a later match report elapsed position directly.
         """
-        # Replacing a reference rewrites tens of thousands of rows; all of it
-        # belongs in one transaction, and the swap should be atomic anyway so a
-        # reader never sees a track with half its hashes.
+        # Rewriting a reference means tens of thousands of rows. Doing it in one
+        # transaction would be atomic but would hold the write lock throughout,
+        # and ingest cannot wait. The track is marked unanchored first, so a
+        # reader mid-rewrite sees a reference it will not trust rather than one
+        # with half its hashes.
         with _db.transaction(self.conn):
-            self.conn.execute("DELETE FROM fp_hashes WHERE track_id = ?", (track_id,))
-            self.conn.executemany(
-                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-                [(value, offset, track_id) for value, offset in hashes],
+            self.conn.execute(
+                "UPDATE fp_tracks SET song_anchored = 0 WHERE id = ?", (track_id,)
             )
+            self.conn.execute("DELETE FROM fp_hashes WHERE track_id = ?", (track_id,))
+        self._insert_hashes(track_id, hashes)
+        with _db.transaction(self.conn):
             self.conn.execute(
                 "UPDATE fp_tracks SET anchor_ms = ?, source = 'broadcast', song_anchored = 1,"
                 " learned_ms = ?, updated_ms = ? WHERE id = ?",

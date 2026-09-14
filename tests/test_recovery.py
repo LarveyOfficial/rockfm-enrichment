@@ -94,3 +94,48 @@ def test_playout_resumes_once_the_position_reaches_real_audio(env):
     playout = Playout(config)
     assert playout.buffer_state()[0] == "ready"
     assert playout.window(), "should serve audio once the hole is behind us"
+
+
+def test_storing_a_song_does_not_block_a_concurrent_writer_for_long(tmp_path):
+    """Ingest must store a segment every six seconds or lose it.
+
+    Upstream keeps only a ~24s live window, so a stall of a few seconds costs
+    audio permanently. Writing a song's ~70,000 hashes in a single transaction
+    holds the write lock for the whole insert; batching bounds how long anyone
+    else can be stuck behind it.
+    """
+    import threading
+    import time as clock
+
+    from rockfm.fingerprint import FingerprintIndex
+
+    path = tmp_path / "contention.db"
+    hashes = [(value % 4_000_000, value // 300) for value in range(60_000)]
+    index = FingerprintIndex(db.connect(path))
+
+    waits: list[float] = []
+    stop = threading.Event()
+
+    def ingest_like():
+        conn = db.connect(path)
+        counter = 0
+        while not stop.is_set():
+            started = clock.perf_counter()
+            db.insert_segment(
+                conn, pdt_ms=counter, seq=counter, duration_ms=6000,
+                relpath=f"{counter}.aac", size=1, fetched_ms=0,
+            )
+            waits.append(clock.perf_counter() - started)
+            counter += 1
+            clock.sleep(0.001)
+
+    writer = threading.Thread(target=ingest_like)
+    writer.start()
+    try:
+        index.add(kind="music", key="song", hashes=hashes, title="x")
+    finally:
+        stop.set()
+        writer.join()
+
+    assert waits, "the concurrent writer never ran"
+    assert max(waits) < 2.0, f"blocked for {max(waits):.1f}s -- ingest would lose segments"

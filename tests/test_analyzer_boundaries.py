@@ -245,3 +245,40 @@ def test_progress_is_recorded_while_scanning(tmp_path, played):
     progress = db.get_meta(analyzer.conn, db.ANALYZER_PROGRESS_KEY)
     done, total = progress.split("/")
     assert int(done) == int(total) > 1
+
+
+def test_a_run_is_only_relearned_when_its_extent_changes(tmp_path, played):
+    """Planning runs after nearly every probe; re-fingerprinting minutes of
+    audio each time would cost more than the scan itself."""
+    analyzer = build(tmp_path)
+    relearns: list[tuple] = []
+
+    def identify(_window, at_ms):
+        name = song_at(played, at_ms)
+        if name is None:
+            return None
+        return Label(key=name, artist="x", title=name, source="stub",
+                     confidence=1.0, track_id=1)
+
+    analyzer._identify = identify
+    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at + PROBE_MS // 2) == key
+    analyzer._edge_match = lambda _w, at, key: song_at(played, at + BISECT_PROBE_MS // 2) == key
+    analyzer._enriched = lambda item: item
+    analyzer._commit = lambda item: None
+    analyzer._relearn = lambda w, run, a, b: relearns.append((run.key, a, b))
+
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
+
+    probes = analyzer._probe_count(Window(0, MIN_WINDOW_MS, samples))
+    # Unmemoised this is one per run per probe -- well over a hundred.
+    assert len(relearns) < probes / 2, f"{len(relearns)} relearns over {probes} probes"
+    # A growing run legitimately refreshes 0-84s, then 0-180s, and so on. What
+    # would be wasted work is relearning something an *earlier* pass already
+    # covered.
+    for index, (key, start, end) in enumerate(relearns):
+        already = [
+            (a, b) for k, a, b in relearns[:index]
+            if k == key and a <= start and b >= end
+        ]
+        assert not already, f"{key} {start}-{end} was already covered by {already}"

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import maximum_filter
 
+from . import db as _db
 from .audio import ANALYSIS_RATE
 
 N_FFT = 1024
@@ -154,10 +155,15 @@ class FingerprintIndex:
         track_id = int(row["id"])
         if row["occurrences"] > 1 and self._hash_count(track_id):
             return track_id  # already fingerprinted; just counted another airing
-        self.conn.executemany(
-            "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-            [(value, offset, track_id) for value, offset in hashes],
-        )
+        # One transaction, not one per row. The connection runs in autocommit,
+        # so an unwrapped executemany of a song's ~70,000 hashes takes the write
+        # lock seventy thousand times -- which with a second writer present
+        # (the catalog seeder) stalls both of them for minutes.
+        with _db.transaction(self.conn):
+            self.conn.executemany(
+                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
+                [(value, offset, track_id) for value, offset in hashes],
+            )
         del cursor
         return track_id
 
@@ -179,10 +185,11 @@ class FingerprintIndex:
         """
         if not hashes:
             return
-        self.conn.executemany(
-            "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-            [(value, offset + shift_frames, track_id) for value, offset in hashes],
-        )
+        with _db.transaction(self.conn):
+            self.conn.executemany(
+                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
+                [(value, offset + shift_frames, track_id) for value, offset in hashes],
+            )
 
     def replace(
         self,
@@ -202,16 +209,20 @@ class FingerprintIndex:
         start of the song rather than wherever we happened to first hear it,
         which is what lets a later match report elapsed position directly.
         """
-        self.conn.execute("DELETE FROM fp_hashes WHERE track_id = ?", (track_id,))
-        self.conn.executemany(
-            "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
-            [(value, offset, track_id) for value, offset in hashes],
-        )
-        self.conn.execute(
-            "UPDATE fp_tracks SET anchor_ms = ?, source = 'broadcast', song_anchored = 1,"
-            " learned_ms = ?, updated_ms = ? WHERE id = ?",
-            (anchor_ms, learned_ms, int(time.time() * 1000), track_id),
-        )
+        # Replacing a reference rewrites tens of thousands of rows; all of it
+        # belongs in one transaction, and the swap should be atomic anyway so a
+        # reader never sees a track with half its hashes.
+        with _db.transaction(self.conn):
+            self.conn.execute("DELETE FROM fp_hashes WHERE track_id = ?", (track_id,))
+            self.conn.executemany(
+                "INSERT INTO fp_hashes (hash, offset, track_id) VALUES (?, ?, ?)",
+                [(value, offset, track_id) for value, offset in hashes],
+            )
+            self.conn.execute(
+                "UPDATE fp_tracks SET anchor_ms = ?, source = 'broadcast', song_anchored = 1,"
+                " learned_ms = ?, updated_ms = ? WHERE id = ?",
+                (anchor_ms, learned_ms, int(time.time() * 1000), track_id),
+            )
 
     def anchor_ms(self, track_id: int) -> int | None:
         row = self.conn.execute(

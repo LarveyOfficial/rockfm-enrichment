@@ -72,6 +72,8 @@ DURATION_DISAGREEMENT = 0.35
 # How far an offset-derived start may sit from the edge we searched for before
 # we distrust it and keep the searched one.
 OFFSET_TRUST_MS = 15_000
+# How much a still-growing run must gain before its reference is refreshed.
+RELEARN_GROWTH_MS = 90_000
 BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
 # Windows must comfortably hold several songs. At five minutes a single track
@@ -189,6 +191,14 @@ class Analyzer:
                 catalog = []
             self.enricher = Enricher(config.art_dir, catalog)
         self.external_calls = 0
+        # Extents already taught to the index this window, so that planning --
+        # which now runs after nearly every probe -- does not re-fingerprint
+        # minutes of audio each time.
+        self._learned: dict[str, tuple[int, int]] = {}
+        # Songs already committed this window. Their reference has been taught
+        # from boundary-refined edges, which is strictly better than the raw
+        # probe extent -- so planning must not overwrite it with the worse one.
+        self._settled: set[str] = set()
 
     # --- cursor ---
 
@@ -514,6 +524,16 @@ class Analyzer:
                 without_seams.append(run)
         return without_seams
 
+    def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
+        """Teach a span, unless this window already taught one covering it."""
+        if run.key is None or run.key in self._settled:
+            return
+        known = self._learned.get(run.key)
+        if known is not None and known[0] <= start_ms and known[1] >= end_ms:
+            return
+        self._relearn(window, run, start_ms, end_ms)
+        self._learned[run.key] = (start_ms, end_ms)
+
     def _relearn(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Replace the reference with the whole aired span of this song."""
         if run.label is None:
@@ -540,9 +560,24 @@ class Analyzer:
         # identified it as a reference the answer was no almost everywhere, so
         # the boundary collapsed onto the last coarse probe -- which is what
         # pinned every song to a multiple of the scan step.
-        for run in runs:
-            if run.key is not None:
-                self._relearn(window, run, run.first_ms, run.last_ms + PROBE_MS)
+        for position, run in enumerate(runs):
+            if run.key is None:
+                continue
+            extent = (run.first_ms, run.last_ms + PROBE_MS)
+            known = self._learned.get(run.key)
+            # Already covered -- including by the wider, boundary-refined span
+            # a commit teaches, which supersedes the run's raw probe extent.
+            if known is not None and known[0] <= extent[0] and known[1] >= extent[1]:
+                continue
+            # The run at the end of the scan grows with every probe. Relearning
+            # it each time would re-fingerprint minutes of audio on every step,
+            # costing far more than the scan; it only has to be good enough to
+            # answer boundary questions, so it is refreshed in chunks. A run the
+            # scan has moved past is final and worth learning exactly.
+            still_growing = position == len(runs) - 1
+            if still_growing and known is not None and extent[1] - known[1] < RELEARN_GROWTH_MS:
+                continue
+            self._learn_once(window, run, *extent)
 
         # One shared boundary per adjacent pair, so items are contiguous and
         # never overlap -- a radio stream has no gaps between one thing and the next.
@@ -583,6 +618,8 @@ class Analyzer:
         longer change, so they are committed as we go.
         """
         probes: list[tuple[int, Label | None]] = []
+        self._learned.clear()
+        self._settled.clear()
         total = self._probe_count(window)
         emitted_to = window.start_ms
         position = window.start_ms
@@ -693,7 +730,9 @@ class Analyzer:
             )
         )
         self._commit(item)
-        self._relearn(window, run, start_ms, end_ms)
+        self._learn_once(window, run, start_ms, end_ms)
+        if run.key:
+            self._settled.add(run.key)
         log.info(
             "%s  %s - %s  (%.0fs, %s)",
             _clock(item.start_ms), item.artist, item.title,

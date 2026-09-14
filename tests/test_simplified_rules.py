@@ -242,3 +242,77 @@ def test_the_same_audio_is_named_when_the_recogniser_was_working(tmp_path):
 
     assert analyzer.conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] > 0
     assert position > window.start_ms
+
+
+# --- one airing that came back under two names ------------------------------
+
+
+def _song(analyzer, start, end, artist, title):
+    from rockfm.analyzer import Item
+
+    analyzer._commit(Item(start_ms=start, end_ms=end, kind=S.KIND_CANCION,
+                          artist=artist, title=title, source="shazamio"))
+
+
+def _rows(analyzer):
+    return list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
+
+
+def _release(analyzer, artist, title, ms):
+    from rockfm.rockfm_api import catalog_key
+
+    db.upsert_song_meta(
+        analyzer.conn,
+        {"key": catalog_key(artist, title), "artist": artist, "title": title,
+         "duration_ms": ms},
+        0,
+    )
+
+
+def test_a_split_airing_is_put_back_together(tmp_path):
+    """Meat Loaf arrived as three items, the middle one a different release.
+
+    The fingerprint matched a reissue for a few probes and the run broke around
+    it. It is one airing and belongs on one row.
+    """
+    analyzer = build(tmp_path)
+    _release(analyzer, "Meat Loaf", "Dead Ringer for Love", 262_000)
+
+    _song(analyzer, 0, 90_000, "Meat Loaf", "Dead Ringer for Love")
+    _song(analyzer, 90_000, 150_000, "Meat Loaf", "Dead Ringer For Love (Remastered)")
+    _song(analyzer, 150_000, 258_000, "Meat Loaf", "Dead Ringer for Love")
+
+    rows = _rows(analyzer)
+    assert len(rows) == 1
+    assert rows[0]["start_ms"] == 0 and rows[0]["end_ms"] == 258_000
+
+
+def test_the_same_song_played_twice_stays_twice(tmp_path):
+    """Two airings run to about twice the release; one airing does not."""
+    analyzer = build(tmp_path)
+    _release(analyzer, "Oasis", "Whatever", 200_000)
+
+    _song(analyzer, 0, 198_000, "Oasis", "Whatever")
+    _song(analyzer, 198_000, 396_000, "Oasis", "Whatever")
+
+    assert len(_rows(analyzer)) == 2
+
+
+def test_two_different_songs_that_abut_stay_apart(tmp_path):
+    analyzer = build(tmp_path)
+    _release(analyzer, "Oasis", "Whatever", 200_000)
+    _release(analyzer, "Oasis", "Wonderwall", 258_000)
+
+    _song(analyzer, 0, 100_000, "Oasis", "Whatever")
+    _song(analyzer, 100_000, 200_000, "Oasis", "Wonderwall")
+
+    assert len(_rows(analyzer)) == 2
+
+
+def test_names_that_merely_rhyme_are_not_merged(tmp_path):
+    from rockfm.analyzer import _alike
+
+    assert _alike("Meat Loaf Dead Ringer for Love",
+                  "Meat Loaf Dead Ringer For Love (Remastered 2016)")
+    assert not _alike("Oasis Whatever", "Oasis Wonderwall")
+    assert not _alike("Queen Radio Ga Ga", "Queen Under Pressure")

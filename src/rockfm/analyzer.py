@@ -28,6 +28,7 @@ which is a useful signal rather than a failure -- it marks a boundary.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, replace
@@ -101,6 +102,14 @@ MIN_SONG_MS = 45_000       # floor for songs of unknown length
 # Stations trail tracks over links and play stings built from them, and those
 # match as confidently as the real airing -- length is what separates them.
 MIN_SONG_FRACTION = 0.15
+# How much longer than the release two adjacent, same-named items may be and
+# still count as one airing split in two rather than the song played twice.
+# Well under 2.0, which is what a genuine repeat would measure.
+MERGE_LENGTH_TOLERANCE = 1.3
+# How alike two names must read before they are treated as the same recording.
+# Loose enough for a reissue's punctuation and parenthetical, tight enough that
+# two different songs by one artist stay apart.
+MERGE_NAME_RATIO = 0.82
 # Windows must comfortably hold several songs. At five minutes a single track
 # fills one, so its boundaries land on the window edges instead of being found
 # in the audio -- which is how every song came out the same length.
@@ -448,11 +457,12 @@ class Analyzer:
         and each piece arrives here separately. Written as it comes, one
         continuous programme becomes three rows with the same name, abutting.
 
-        Songs are exempt. Two airings of the same track are two events, and
-        merging them would turn a repeat into one impossibly long play.
+        Songs merge only under the stricter rule in `_one_airing_split_in_two`:
+        two airings of the same track are two events, and merging those would
+        turn a repeat into one impossibly long play.
         """
         if item.kind == S.KIND_CANCION:
-            return False
+            return self._one_airing_split_in_two(item)
         previous = db.previous_timeline(self.conn, item.start_ms)
         if previous is None or previous["kind"] != item.kind:
             return False
@@ -465,6 +475,62 @@ class Analyzer:
         if previous["end_ms"] >= item.end_ms:
             return True  # already covered; writing it again would duplicate
         db.set_timeline_end(self.conn, previous["id"], item.end_ms)
+        return True
+
+    def _one_airing_split_in_two(self, item: Item) -> bool:
+        """Is this the rest of the song already on the timeline?
+
+        A single airing can come back under more than one name. "Dead Ringer
+        for Love" arrived as three items, the middle one a different release of
+        the same recording -- the fingerprint matched a reissue for a few
+        probes and the run broke in two around it.
+
+        Two tests, and both are needed. Similar names alone would merge a track
+        played twice in an hour into one impossibly long play. Length alone
+        would merge two different songs that happen to abut. Together they say:
+        these are the same song, adjacent, and together they still only add up
+        to about one airing of it.
+        """
+        previous = db.previous_timeline(self.conn, item.start_ms)
+        if previous is None or previous["kind"] != S.KIND_CANCION:
+            return False
+        if not (item.artist and item.title and previous["artist"] and previous["title"]):
+            return False
+
+        seam_ms = int(settings.load(self.conn)["max_seam_seconds"] * 1000)
+        if item.start_ms - previous["end_ms"] > seam_ms:
+            return False
+        if previous["end_ms"] >= item.end_ms:
+            return True
+
+        if not _alike(
+            f'{previous["artist"]} {previous["title"]}', f"{item.artist} {item.title}"
+        ):
+            return False
+
+        # One airing, or two? The release length decides.
+        combined = item.end_ms - previous["start_ms"]
+        expected = self._expected_ms(catalog_key(item.artist, item.title)) or (
+            self._expected_ms(catalog_key(previous["artist"], previous["title"]))
+        )
+        if not expected:
+            # Without a release length there is no way to tell one airing split
+            # in two from the song played twice, and merging a repeat is the
+            # worse mistake. Leave them alone.
+            return False
+        if combined > expected * MERGE_LENGTH_TOLERANCE:
+            log.debug(
+                "not merging %s: %.0fs together against a release of %.0fs",
+                item.title, combined / 1000, expected / 1000,
+            )
+            return False
+
+        db.set_timeline_end(self.conn, previous["id"], item.end_ms)
+        log.info(
+            "%s  merged a split airing of %s - %s (%.0fs)",
+            _clock(previous["start_ms"]), previous["artist"], previous["title"],
+            combined / 1000,
+        )
         return True
 
     def _enriched(self, item: Item) -> Item:
@@ -1224,6 +1290,25 @@ class Analyzer:
             return 0
         self.set_cursor(position)
         return advance
+
+
+def _alike(left: str, right: str) -> bool:
+    """Do these read as the same recording under two names?
+
+    Releases differ in punctuation, casing and parentheticals -- a remaster, a
+    single edit, a compilation -- while naming the same audio.
+    """
+    from difflib import SequenceMatcher
+
+    def tidy(text: str) -> str:
+        return re.sub(r"[^a-z0-9 ]+", " ", text.casefold()).strip()
+
+    a, b = tidy(left), tidy(right)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= MERGE_NAME_RATIO
 
 
 def _confidence(match: fingerprint.Match) -> float:

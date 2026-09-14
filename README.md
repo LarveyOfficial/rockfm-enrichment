@@ -98,6 +98,31 @@ The first run seeds the fingerprint index from RockFM's 951-track rotation
 catalog. That takes around twenty minutes in the background and happens once;
 playout works throughout.
 
+### On Unraid
+
+The image is not published to a registry, so build it on the server once:
+
+```bash
+git clone <this repo> /mnt/user/appdata/rockfm-src
+cd /mnt/user/appdata/rockfm-src
+docker build -t rockfm-enrichment:latest .
+```
+
+Then copy `unraid-template.xml` to
+`/boot/config/plugins/dockerMan/templates-user/` and add the container from
+*Docker → Add Container → Template: user-defined*. The only setting that must be
+right is **Your Timezone**; the defaults cover everything else, and the AzuraCast
+fields can stay blank until you want them.
+
+For a much smaller image, build with `--build-arg INCLUDE_SEGMENTER=false` and
+set `SEGMENTER=light`. The classifier then abstains more often on speech rather
+than deciding.
+
+**Nothing plays for the first six hours.** That is the buffer filling to match
+the delay, not a fault: the dashboard shows a countdown and the health check
+stays green throughout. Recognition starts working within minutes, so the
+dashboard is useful long before the audio is.
+
 ### Key settings
 
 | Variable | Default | Notes |

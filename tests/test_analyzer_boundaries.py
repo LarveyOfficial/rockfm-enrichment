@@ -320,3 +320,55 @@ def test_a_run_is_only_relearned_when_its_extent_changes(tmp_path, played):
             if k == key and a <= start and b >= end
         ]
         assert not already, f"{key} {start}-{end} was already covered by {already}"
+
+
+def test_a_reference_is_never_replaced_with_a_shorter_one(tmp_path):
+    """Re-analysing must not erode what it already knows.
+
+    replace() clears a track's hashes before writing new ones, so learning a
+    coarse probe extent over a boundary-refined span loses coverage the edge
+    search depends on -- the song then measures shorter, and shorter again on
+    the next pass. Observed live: Fleetwood Mac went 173.9s, then 155.9s, with
+    the gap after it growing by exactly the difference.
+    """
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    label = Label(key="a|b", artist="a", title="b", source="s",
+                  confidence=1.0, track_id=0)
+    track_id = analyzer.index.add(
+        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=0
+    )
+    label = Label(key="a|b", artist="a", title="b", source="s",
+                  confidence=1.0, track_id=track_id)
+    run = Run(key="a|b", label=label, first_ms=0, last_ms=170_000)
+
+    # A good, refined reference: the whole song.
+    analyzer.index.replace(track_id, [(1, 0), (2, 10)], anchor_ms=0, learned_ms=174_000)
+    assert analyzer.index.get(track_id)["learned_ms"] == 174_000
+
+    # A later pass offers a shorter, coarser span. It must be refused.
+    attempted: list = []
+    analyzer._relearn = lambda w, r, a, b: attempted.append((a, b))
+    analyzer._learn_once(None, run, 0, 156_000)
+
+    assert attempted == [], "a shorter reference overwrote a longer one"
+    assert analyzer.index.get(track_id)["learned_ms"] == 174_000
+
+
+def test_a_longer_reference_still_wins(tmp_path):
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    track_id = analyzer.index.add(
+        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=0
+    )
+    analyzer.index.replace(track_id, [(1, 0)], anchor_ms=0, learned_ms=100_000)
+    label = Label(key="a|b", artist="a", title="b", source="s",
+                  confidence=1.0, track_id=track_id)
+    run = Run(key="a|b", label=label, first_ms=0, last_ms=200_000)
+
+    attempted: list = []
+    analyzer._relearn = lambda w, r, a, b: attempted.append((a, b))
+    analyzer._learn_once(None, run, 0, 210_000)
+    assert attempted == [(0, 210_000)]

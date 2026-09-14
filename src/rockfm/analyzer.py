@@ -515,6 +515,22 @@ class Analyzer:
         known = self._learned.get(run.key)
         if known is not None and known[0] <= start_ms and known[1] >= end_ms:
             return
+        # Never trade a longer reference for a shorter one. replace() clears
+        # what is there, so a downgrade permanently loses coverage the edge
+        # search depends on.
+        if run.label is not None:
+            existing = self.index.get(run.label.track_id)
+            if (
+                existing is not None
+                and existing["song_anchored"]
+                and existing["learned_ms"]
+                and existing["learned_ms"] > end_ms - start_ms
+            ):
+                log.debug(
+                    "keeping the longer reference for %s (%.0fs over %.0fs)",
+                    run.key, existing["learned_ms"] / 1000, (end_ms - start_ms) / 1000,
+                )
+                return
         self._relearn(window, run, start_ms, end_ms)
         self._learned[run.key] = (start_ms, end_ms)
 
@@ -547,6 +563,15 @@ class Analyzer:
         for position, run in enumerate(runs):
             if run.key is None:
                 continue
+            # A song already learned from refined boundaries -- on an earlier
+            # airing or an earlier pass -- has a better reference than anything
+            # the raw probe extent could teach. Overwriting it with the coarse
+            # one shrinks what the edge search can confirm, so the song comes
+            # out shorter, and shorter again the next time round.
+            if run.label is not None:
+                existing = self.index.get(run.label.track_id)
+                if existing is not None and existing["song_anchored"]:
+                    continue
             extent = (run.first_ms, run.last_ms + PROBE_MS)
             known = self._learned.get(run.key)
             # Already covered -- including by the wider, boundary-refined span

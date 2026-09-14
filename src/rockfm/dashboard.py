@@ -46,6 +46,8 @@ button{background:#1e1e26;color:var(--fg);border:1px solid var(--line);border-ra
   padding:6px 12px;font-size:.78rem;cursor:pointer;font-family:inherit}
 button:hover{background:#26262f}
 button.on{background:var(--cancion);border-color:var(--cancion);color:#fff}
+button.danger{border-color:#7a3a30;color:#e08a75}
+button.danger:hover{background:#2e1f1c;border-color:#a04a3c}
 button:disabled{opacity:.4;cursor:default}
 
 .track{position:relative;height:56px;background:#0e0e12;border:1px solid var(--line);
@@ -121,6 +123,7 @@ tr.sel td{background:#1f2733}
       <button data-h="24">24 h</button>
       <span style="flex:1"></span>
       <button id="reanalyze" title="Re-run the analyzer over everything still buffered. Keeps the fingerprint index.">re-analyze buffer</button>
+      <button id="reset" class="danger" title="Throw away the timeline and every reference learned from air, then re-seed. Keeps the recorded audio, the catalogue and your settings.">reset analysis</button>
       <button id="stop" disabled>stop audio</button>
     </div>
     <div class="track" id="track"><div class="head" id="head"></div></div>
@@ -550,6 +553,30 @@ el('auto').onclick = () => {
   el('auto').classList.toggle('on', auto);
 };
 el('stop').onclick = stopAudio;
+el('reset').onclick = async () => {
+  const ok = confirm(
+    'Throw away the timeline and everything learned from the air, then re-seed?'
+    + '\n\nKept: the recorded audio, the catalogue references, your settings.'
+    + '\nDropped: every song and gap on the timeline, and any reference a'
+    + ' broadcast overwrote.\n\nThe analyzer restarts from the beginning of the'
+    + ' buffer. Nothing stops playing.'
+  );
+  if (!ok) return;
+  const btn = el('reset');
+  btn.disabled = true;
+  const previous = btn.textContent;
+  try {
+    const res = await fetch('/api/reset', {method: 'POST'});
+    const body = res.ok ? await res.json() : null;
+    btn.textContent = body
+      ? `dropped ${body.dropped_references}, kept ${body.kept_references}`
+      : 'failed';
+  } catch (err) {
+    btn.textContent = 'failed';
+  }
+  setTimeout(() => { btn.textContent = previous; btn.disabled = false; }, 6000);
+  load();
+};
 el('reanalyze').onclick = async () => {
   const btn = el('reanalyze');
   btn.disabled = true;

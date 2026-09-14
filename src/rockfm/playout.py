@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -380,6 +381,44 @@ class Playout:
         }
 
 
+_reseed_lock = threading.Lock()
+_reseeding = False
+
+
+def _start_reseed(config: Config) -> bool:
+    """Restore the catalogue references a reset dropped, without blocking it.
+
+    Seeding fetches and fingerprints hundreds of previews, so it runs on its own
+    connection in the background exactly as it does at startup. Refused while
+    one is already running: a second pass would do nothing but contend for the
+    write lock the analyzer is reading around.
+    """
+    global _reseeding
+    with _reseed_lock:
+        if _reseeding:
+            return False
+        _reseeding = True
+
+    def run() -> None:
+        global _reseeding
+        try:
+            from .seed import seed
+
+            conn = db.connect(config.db_path)
+            try:
+                seed(conn, config)
+            finally:
+                conn.close()
+        except Exception as exc:
+            log.warning("reseed failed: %s", exc)
+        finally:
+            with _reseed_lock:
+                _reseeding = False
+
+    threading.Thread(target=run, name="reseed", daemon=True).start()
+    return True
+
+
 def _iso(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).isoformat()
 
@@ -519,6 +558,53 @@ def create_app(config: Config | None = None) -> FastAPI:
             {
                 "restarted": True,
                 "from": _iso(earliest["pdt_ms"]) if earliest else None,
+                "buffered_seconds": state.status()["buffer"]["seconds"],
+            },
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.post("/api/reset")
+    def reset() -> JSONResponse:
+        """Throw away everything the analyzer worked out, keep everything it cost.
+
+        A fix to how audio is read cannot reach conclusions already drawn from
+        it, and some of those conclusions are load-bearing: a reference learned
+        from a boundary that was wrong stays wrong, because relearning refuses
+        to trade a longer reference for a shorter one. Re-analysing alone
+        therefore repaints the timeline over the same bad references.
+
+        What is expensive is the recording and the catalogue, so both stay. The
+        audio is untouched. Seeded references are untouched too -- except where
+        a broadcast overwrote one, which `source` records, since seeding writes
+        `preview` and relearning writes `broadcast`. Those are dropped and
+        re-seeded in the background; seeding skips every key it still finds, so
+        it restores exactly what was removed and nothing else.
+        """
+        with db.transaction(state.conn):
+            state.conn.execute("DELETE FROM timeline")
+            state.conn.execute(
+                "DELETE FROM fp_hashes WHERE track_id IN"
+                " (SELECT id FROM fp_tracks WHERE source <> 'preview')"
+            )
+            dropped = state.conn.execute(
+                "DELETE FROM fp_tracks WHERE source <> 'preview'"
+            ).rowcount
+            state.conn.execute(
+                "DELETE FROM meta WHERE key = ?", (db.ANALYZER_CURSOR_KEY,)
+            )
+
+        kept = state.conn.execute("SELECT COUNT(*) FROM fp_tracks").fetchone()[0]
+        reseeding = _start_reseed(state.config)
+        log.info(
+            "reset: dropped %d learned references, kept %d seeded, buffer intact",
+            dropped, kept,
+        )
+        return JSONResponse(
+            {
+                "reset": True,
+                "dropped_references": dropped,
+                "kept_references": kept,
+                "reseeding": reseeding,
                 "buffered_seconds": state.status()["buffer"]["seconds"],
             },
             headers={"Access-Control-Allow-Origin": "*"},

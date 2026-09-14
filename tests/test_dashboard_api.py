@@ -205,3 +205,105 @@ def test_reanalyze_rewinds_the_analyzer_without_losing_what_it_learned(env):
     # Everything learned survives; re-seeding would cost twenty minutes.
     assert FingerprintIndex(conn).get(track_id) is not None
     assert conn.execute("SELECT COUNT(*) FROM fp_hashes").fetchone()[0] == 2
+
+
+# --- resetting the analysis, keeping what it cost ---------------------------
+
+
+@pytest.fixture
+def no_reseed(monkeypatch):
+    """Seeding fetches hundreds of previews; the tests must not."""
+    from rockfm import playout
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        playout, "_start_reseed", lambda _config: calls.append(True) or True
+    )
+    return calls
+
+
+def _reference(conn, key: str, source: str) -> int:
+    from rockfm.fingerprint import FingerprintIndex
+
+    return FingerprintIndex(conn).add(
+        kind="music", key=key, hashes=[(1234, 0), (5678, 3)],
+        title=key, artist="a", source=source, anchor_ms=0,
+    )
+
+
+def test_reset_keeps_the_recording_and_the_catalogue(env, no_reseed):
+    config, conn, client = env
+    record(conn, int(time.time() * 1000) - 60_000, 10)
+    seeded = _reference(conn, "seeded-track", "preview")
+    learned = _reference(conn, "learned-track", "broadcast")
+    db.upsert_timeline(
+        conn, {"start_ms": 1_000, "end_ms": 2_000, "kind": "cancion"}, 0
+    )
+    db.set_meta(conn, db.ANALYZER_CURSOR_KEY, "999")
+    conn.commit()
+
+    body = client.post("/api/reset").json()
+    assert body["reset"] is True
+    assert body["dropped_references"] == 1
+    assert body["kept_references"] == 1
+    assert no_reseed, "the dropped catalogue references were never restored"
+
+    # The expensive things survive.
+    assert db.segment_count(conn) == 10
+    assert conn.execute(
+        "SELECT COUNT(*) FROM fp_tracks WHERE id = ?", (seeded,)
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM fp_hashes WHERE track_id = ?", (seeded,)
+    ).fetchone()[0] > 0
+
+    # Everything derived from them does not.
+    assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM fp_tracks WHERE id = ?", (learned,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM fp_hashes WHERE track_id = ?", (learned,)
+    ).fetchone()[0] == 0
+    assert db.get_meta(conn, db.ANALYZER_CURSOR_KEY) is None
+
+
+def test_reset_drops_a_seeded_reference_a_broadcast_overwrote(env, no_reseed):
+    """`replace()` marks the overwrite by flipping source to 'broadcast'.
+
+    That reference is no longer the catalogue's preview, so keeping it would
+    keep whatever the bad boundary taught. Seeding restores it by key.
+    """
+    _, conn, client = env
+    _reference(conn, "was-seeded-then-relearned", "broadcast")
+    conn.commit()
+
+    assert client.post("/api/reset").json()["dropped_references"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM fp_tracks").fetchone()[0] == 0
+
+
+def test_a_second_reseed_is_refused_while_one_is_running(env, monkeypatch):
+    """Two passes would only contend for the write lock the analyzer reads around."""
+    from rockfm import playout
+
+    config, _, _ = env
+    monkeypatch.setattr(playout, "_reseeding", True)
+    assert playout._start_reseed(config) is False
+
+
+def test_a_reseed_starts_when_none_is_running(env, monkeypatch):
+    from rockfm import playout
+
+    config, _, _ = env
+    seeded: list[bool] = []
+    monkeypatch.setattr(playout, "_reseeding", False)
+    monkeypatch.setattr(
+        "rockfm.seed.seed", lambda conn, cfg, **kw: seeded.append(True)
+    )
+
+    assert playout._start_reseed(config) is True
+    for _ in range(200):                       # the work happens on a thread
+        if seeded:
+            break
+        time.sleep(0.01)
+    assert seeded, "the reseed thread never ran"

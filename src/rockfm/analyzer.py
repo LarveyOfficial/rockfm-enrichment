@@ -397,6 +397,8 @@ class Analyzer:
     # --- committing ---
 
     def _commit(self, item: Item) -> None:
+        if self._extends_previous(item):
+            return
         db.upsert_timeline(
             self.conn,
             {
@@ -417,6 +419,33 @@ class Analyzer:
             },
             int(time.time() * 1000),
         )
+
+    def _extends_previous(self, item: Item) -> bool:
+        """Grow the item before this one rather than writing its twin.
+
+        The scan settles a gap in pieces -- a sting it identified and then
+        rejected as too short to be a play, a stretch split across two passes --
+        and each piece arrives here separately. Written as it comes, one
+        continuous programme becomes three rows with the same name, abutting.
+
+        Songs are exempt. Two airings of the same track are two events, and
+        merging them would turn a repeat into one impossibly long play.
+        """
+        if item.kind == S.KIND_CANCION:
+            return False
+        previous = db.previous_timeline(self.conn, item.start_ms)
+        if previous is None or previous["kind"] != item.kind:
+            return False
+        # Only a gap small enough to be a seam counts as touching.
+        seam_ms = int(settings.load(self.conn)["max_seam_seconds"] * 1000)
+        if item.start_ms - previous["end_ms"] > seam_ms:
+            return False
+        if (previous["show_title"] or None) != (item.show_title or None):
+            return False
+        if previous["end_ms"] >= item.end_ms:
+            return True  # already covered; writing it again would duplicate
+        db.set_timeline_end(self.conn, previous["id"], item.end_ms)
+        return True
 
     def _enriched(self, item: Item) -> Item:
         if not (item.artist and item.title):

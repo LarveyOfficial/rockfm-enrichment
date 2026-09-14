@@ -133,3 +133,62 @@ def test_the_thresholds_are_read_live(tmp_path):
 def test_no_advert_kind_remains() -> None:
     assert S.ALL_KINDS == (S.KIND_CANCION, S.KIND_PROGRAMA, S.KIND_DESCONOCIDO)
     assert not hasattr(S, "KIND_PUBLICIDAD")
+
+
+# --- one programme is one row ----------------------------------------------
+
+
+def _gap(analyzer, start, end, show="Nano Jaquotot"):
+    from rockfm.analyzer import Item
+
+    return Item(start_ms=start, end_ms=end, kind=S.KIND_PROGRAMA,
+                show_title=show, show_lead="x", source="schedule")
+
+
+def test_a_programme_settled_in_pieces_is_one_row(tmp_path):
+    """The scan settles a gap in pieces; each piece arrives separately.
+
+    Written as it comes, one continuous programme became three abutting rows
+    with the same name.
+    """
+    analyzer = build(tmp_path)
+    analyzer._commit(_gap(analyzer, 0, 118_641))
+    analyzer._commit(_gap(analyzer, 118_641, 165_609))
+    analyzer._commit(_gap(analyzer, 165_609, 213_609))
+
+    rows = list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
+    assert len(rows) == 1
+    assert rows[0]["start_ms"] == 0
+    assert rows[0]["end_ms"] == 213_609
+
+
+def test_a_different_programme_starts_a_new_row(tmp_path):
+    analyzer = build(tmp_path)
+    analyzer._commit(_gap(analyzer, 0, 60_000, show="Nano Jaquotot"))
+    analyzer._commit(_gap(analyzer, 60_000, 120_000, show="El Pirata y su banda"))
+
+    rows = list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
+    assert len(rows) == 2
+
+
+def test_a_programme_after_a_real_break_starts_a_new_row(tmp_path):
+    """Far enough apart to be two separate stretches, not one interrupted."""
+    analyzer = build(tmp_path)
+    analyzer._commit(_gap(analyzer, 0, 60_000))
+    analyzer._commit(_gap(analyzer, 400_000, 460_000))
+
+    rows = list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
+    assert len(rows) == 2
+
+
+def test_two_airings_of_one_song_stay_two_rows(tmp_path):
+    """Merging a repeat would turn it into one impossibly long play."""
+    from rockfm.analyzer import Item
+
+    analyzer = build(tmp_path)
+    for start, end in ((0, 200_000), (200_000, 400_000)):
+        analyzer._commit(Item(start_ms=start, end_ms=end, kind=S.KIND_CANCION,
+                              title="Whatever", artist="Oasis", source="local"))
+
+    rows = list(analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms"))
+    assert len(rows) == 2

@@ -37,6 +37,10 @@ class Recognizer(Protocol):
     def close(self) -> None: ...
 
 
+# Seconds between calls when the recogniser is healthy. See
+# `settings.recognizer_interval_seconds`, which overrides this at runtime.
+DEFAULT_MIN_INTERVAL = 12.0
+
 # Consecutive failures before the external recogniser is left alone entirely.
 OPEN_AFTER_ERRORS = 4
 
@@ -142,7 +146,7 @@ class NullRecognizer:
         return None
 
 
-def build(name: str, min_interval: float = 3.0) -> Recognizer:
+def build(name: str, min_interval: float = DEFAULT_MIN_INTERVAL) -> Recognizer:
     key = (name or "").strip().lower()
     try:
         if key in {"shazam", "shazamio"}:

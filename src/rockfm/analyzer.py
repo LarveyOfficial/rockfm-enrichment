@@ -259,6 +259,15 @@ class Analyzer:
     def _recognizer_degraded(self) -> bool:
         return bool(getattr(self.recognizer, "degraded", False))
 
+    def _pace_recognizer(self) -> None:
+        """Pick up the configured call interval without a restart."""
+        if not hasattr(self.recognizer, "min_interval"):
+            return
+        wanted = float(settings.load(self.conn)["recognizer_interval_seconds"])
+        if wanted != self.recognizer.min_interval:
+            log.info("external lookups now paced at %.0fs apart", wanted)
+            self.recognizer.min_interval = wanted
+
     def _expected_ms(self, key: str) -> int | None:
         """How long this song is supposed to run, per iTunes/Deezer."""
         row = db.get_song_meta(self.conn, key)
@@ -680,6 +689,7 @@ class Analyzer:
         then everything at once. Runs far enough behind the scan position can no
         longer change, so they are committed as we go.
         """
+        self._pace_recognizer()
         probes: list[tuple[int, Label | None]] = []
         self._learned.clear()
         self._settled.clear()

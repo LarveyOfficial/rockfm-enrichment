@@ -34,7 +34,12 @@ MASK: Final = "••••••••"
 FIELDS: Final[dict[str, tuple[Any, str, str]]] = {
     "public_url": ("", "PUBLIC_URL", "text"),
     "display_language": ("es", "DISPLAY_LANGUAGE", "text"),
+    # Two separate judgements that happen to be about short stretches of audio.
+    # One asks whether a non-song stretch is worth naming at all; the other how
+    # much of a gap between two songs is just the crossfade. A station with long
+    # crossfades and short jingles needs them set differently.
     "min_nonmusic_seconds": (5.0, "MIN_NONMUSIC_SECONDS", "number"),
+    "max_seam_seconds": (10.0, "MAX_SEAM_SECONDS", "number"),
     "azuracast_enabled": (False, "", "bool"),
     "azuracast_base_url": ("", "AZURACAST_BASE_URL", "text"),
     "azuracast_station_id": ("", "AZURACAST_STATION_ID", "text"),

@@ -697,14 +697,13 @@ class Analyzer:
         leaves a few seconds belonging to neither -- too short to be an advert
         or anything else worth naming, but long enough that a player shows the
         previous song through it, since nothing tells it otherwise. Anything
-        below the non-music threshold is split down the middle so the two songs
-        simply abut.
+        below max_seam_seconds is split down the middle so the two songs abut.
         """
         previous = db.previous_timeline(self.conn, start_ms)
         if previous is None:
             return start_ms
         seam = start_ms - previous["end_ms"]
-        threshold = int(settings.load(self.conn)["min_nonmusic_seconds"] * 1000)
+        threshold = int(settings.load(self.conn)["max_seam_seconds"] * 1000)
         if not 0 < seam <= threshold:
             return start_ms
         middle = previous["end_ms"] + seam // 2

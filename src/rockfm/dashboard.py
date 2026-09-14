@@ -415,6 +415,7 @@ const SETTING_LABELS = {
   public_url: 'Public URL',
   display_language: 'Display language',
   min_nonmusic_seconds: 'Min non-music seconds',
+  max_seam_seconds: 'Max crossfade seam seconds',
   azuracast_enabled: 'Enable AzuraCast',
   azuracast_base_url: 'AzuraCast base URL',
   azuracast_station_id: 'Station ID',

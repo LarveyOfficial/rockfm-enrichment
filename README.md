@@ -47,9 +47,10 @@ none of the above (`desconocido`).
 
 **Seams between songs.** Radio crossfades, and each edge is located
 independently, so a few seconds can fall between one song ending and the next
-beginning. Anything shorter than the non-music threshold is split down the
+beginning. Anything shorter than **Max crossfade seam seconds** is split down the
 middle so the two songs abut -- otherwise a player keeps showing the previous
-song through the gap, since nothing tells it to change.
+song through the gap, since nothing tells it to change. Longer than that and it
+is a real break, left for the classifier.
 
 **Adverts vs DJ talk.** Adverts repeat; a presenter talking never does. Non-song audio is fingerprinted into a second index, so anything heard
 before is an advert or an ident and anything genuinely new is live talk. A
@@ -159,8 +160,10 @@ Only what cannot change while running is an environment variable:
 | `AZURACAST_DJ_CODEC` | `mp3` | or `copy` to pass the original AAC through |
 
 Everything else lives in the dashboard's **Settings** panel and is stored in the
-database: the whole AzuraCast integration, the public URL, display language and
-the non-music threshold. Restarting to change a setting would tear a hole in the
+database: the whole AzuraCast integration, the public URL, display language, and
+two independent thresholds -- **Min non-music seconds** (below which a non-song
+stretch gets no verdict at all) and **Max crossfade seam seconds** (below which a
+gap between two songs is just the crossfade and gets closed). Restarting to change a setting would tear a hole in the
 recording and discard whatever the analyzer was part way through, so nothing
 worth changing needs one.
 

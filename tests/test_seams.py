@@ -38,7 +38,7 @@ def place(conn, start_ms, end_ms, title="A"):
 
 
 def test_a_short_seam_is_split_down_the_middle(analyzer):
-    settings.save(analyzer.conn, {"min_nonmusic_seconds": 10})
+    settings.save(analyzer.conn, {"max_seam_seconds": 10})
     place(analyzer.conn, 0, 100_000)
     # The next song starts 6.5s later -- the crossfade the edges disagreed over.
     assert analyzer._close_seam(106_500) == 103_250
@@ -48,7 +48,7 @@ def test_a_short_seam_is_split_down_the_middle(analyzer):
 
 
 def test_the_two_songs_end_up_touching(analyzer):
-    settings.save(analyzer.conn, {"min_nonmusic_seconds": 10})
+    settings.save(analyzer.conn, {"max_seam_seconds": 10})
     place(analyzer.conn, 0, 100_000)
     start = analyzer._close_seam(106_500)
     previous = db.previous_timeline(analyzer.conn, start + 1)
@@ -57,20 +57,27 @@ def test_the_two_songs_end_up_touching(analyzer):
 
 def test_a_real_break_is_left_alone(analyzer):
     """Longer than the threshold is an advert break, not a seam."""
-    settings.save(analyzer.conn, {"min_nonmusic_seconds": 10})
+    settings.save(analyzer.conn, {"max_seam_seconds": 10})
     place(analyzer.conn, 0, 100_000)
     assert analyzer._close_seam(160_000) == 160_000
     assert db.timeline_at(analyzer.conn, 99_000)["end_ms"] == 100_000
 
 
-def test_the_threshold_follows_the_setting(analyzer):
-    settings.save(analyzer.conn, {"min_nonmusic_seconds": 10})
+def test_the_threshold_follows_its_own_setting(analyzer):
+    settings.save(analyzer.conn, {"max_seam_seconds": 10})
     place(analyzer.conn, 0, 100_000)
     assert analyzer._close_seam(108_000) != 108_000   # 8s seam, under 10
 
-    settings.save(analyzer.conn, {"min_nonmusic_seconds": 5})
+    settings.save(analyzer.conn, {"max_seam_seconds": 5})
     place(analyzer.conn, 200_000, 300_000)
     assert analyzer._close_seam(308_000) == 308_000   # 8s seam, over 5
+
+
+def test_seam_closing_is_independent_of_the_non_music_floor(analyzer):
+    """They were one dial doing two jobs; tuning one must not move the other."""
+    settings.save(analyzer.conn, {"max_seam_seconds": 12, "min_nonmusic_seconds": 2})
+    place(analyzer.conn, 0, 100_000)
+    assert analyzer._close_seam(108_000) == 104_000
 
 
 def test_nothing_to_meet_leaves_the_start_alone(analyzer):

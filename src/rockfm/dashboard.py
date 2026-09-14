@@ -17,7 +17,7 @@ DASHBOARD_HTML = """<!doctype html>
   color-scheme:dark;
   --bg:#0b0b0e; --panel:#141419; --line:#26262e; --fg:#f2f2f5; --dim:#8a8a95;
   --cancion:#3d7dd8; --publicidad:#d98b2b; --programa:#2f9e8f;
-  --noticias:#8b5cf6; --sintonia:#6b7280; --desconocido:#3f3f46;
+  --desconocido:#3f3f46;
   --ok:#3fb950; --warn:#d29922; --bad:#f85149;
 }
 *{box-sizing:border-box}
@@ -87,6 +87,13 @@ tr.sel td{background:#1f2733}
 .tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:.64rem;color:#fff}
 .muted{color:var(--dim)}
 .empty{color:var(--dim);padding:18px;text-align:center;font-size:.82rem}
+.look{display:grid;grid-template-columns:110px 1fr 1fr 1.4fr 44px;gap:8px 10px;align-items:center}
+.look .hdr{color:var(--dim);font-size:.66rem;text-transform:uppercase;letter-spacing:.07em}
+.look input{background:#0e0e12;border:1px solid var(--line);border-radius:6px;color:var(--fg);
+  padding:6px 9px;font:inherit;font-size:.78rem;width:100%}
+.look input:focus{outline:1px solid var(--cancion);border-color:var(--cancion)}
+.look .thumb{width:40px;height:40px;border-radius:5px;object-fit:cover;background:#0e0e12}
+.saved{color:var(--ok);font-size:.76rem;margin-left:10px}
 </style></head><body>
 <div class="wrap">
   <header>
@@ -118,6 +125,16 @@ tr.sel td{background:#1f2733}
   </div>
 
   <div class="panel">
+    <h2>Appearance</h2>
+    <p class="muted" style="margin:-4px 0 12px;font-size:.76rem">
+      What players show for things that are not songs. Leave a field blank to use
+      the built-in answer &mdash; the real programme name and artwork for presenter
+      talk, the station name for anything unrecognised.
+    </p>
+    <div id="appearance"><div class="empty">loading&hellip;</div></div>
+  </div>
+
+  <div class="panel">
     <h2>Items</h2>
     <div style="max-height:340px;overflow:auto">
       <table><thead><tr>
@@ -129,7 +146,7 @@ tr.sel td{background:#1f2733}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
 <script>
-const KINDS = ['cancion','publicidad','programa','noticias','sintonia','desconocido'];
+const KINDS = ['cancion','publicidad','programa','desconocido'];
 const colour = k => getComputedStyle(document.documentElement)
   .getPropertyValue('--' + (KINDS.includes(k) ? k : 'desconocido')).trim();
 
@@ -367,6 +384,66 @@ audio.addEventListener('timeupdate', () => {
 });
 audio.addEventListener('ended', stopAudio);
 
+// --- appearance ---------------------------------------------------------
+
+let look = null;
+
+async function loadAppearance() {
+  look = await (await fetch('/api/appearance', {cache:'no-store'})).json();
+  const rows = look.configurable.map(kind => {
+    const cur = look.current[kind] || {}, def = look.defaults[kind] || {};
+    const field = (name, placeholder) =>
+      `<input data-kind="${kind}" data-field="${name}" value="${escape(cur[name] || '')}"
+              placeholder="${escape(placeholder)}">`;
+    return `
+      <span><span class="tag" style="background:${colour(kind)}">${kind}</span></span>
+      ${field('title', def.title || 'programme name')}
+      ${field('artist', def.artist || 'presenters')}
+      ${field('art', 'artwork URL')}
+      <img class="thumb" data-thumb="${kind}" src="${escape(cur.art || '')}" alt="">`;
+  }).join('');
+  el('appearance').innerHTML = `
+    <div class="look">
+      <span class="hdr">kind</span><span class="hdr">title</span>
+      <span class="hdr">artist</span><span class="hdr">artwork URL</span><span></span>
+      ${rows}
+    </div>
+    <div class="actions">
+      <button id="save-look">save</button>
+      <span id="saved-note" class="saved"></span>
+    </div>`;
+  el('save-look').onclick = saveAppearance;
+  document.querySelectorAll('[data-field="art"]').forEach(input => {
+    input.oninput = () => {
+      const thumb = document.querySelector(`[data-thumb="${input.dataset.kind}"]`);
+      if (thumb) thumb.src = input.value;
+    };
+  });
+}
+
+async function saveAppearance() {
+  const payload = {};
+  document.querySelectorAll('#appearance input').forEach(input => {
+    (payload[input.dataset.kind] ||= {})[input.dataset.field] = input.value;
+  });
+  const btn = el('save-look');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/appearance', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(res.status);
+    look.current = (await res.json()).current;
+    el('saved-note').textContent = 'saved';
+    setTimeout(() => { el('saved-note').textContent = ''; }, 2500);
+    load();
+  } catch (err) {
+    el('saved-note').textContent = 'could not save';
+  }
+  btn.disabled = false;
+}
+
 // --- controls -----------------------------------------------------------
 
 [...document.querySelectorAll('[data-h]')].forEach(btn => {
@@ -383,6 +460,7 @@ el('auto').onclick = () => {
 el('stop').onclick = stopAudio;
 
 load();
+loadAppearance();
 setInterval(() => { if (auto) load(); }, 5000);
 </script></body></html>
 """

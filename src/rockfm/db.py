@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS timeline (
     id         INTEGER PRIMARY KEY,
     start_ms   INTEGER NOT NULL,
     end_ms     INTEGER NOT NULL,
-    kind       TEXT    NOT NULL,  -- cancion|publicidad|programa|noticias|sintonia|desconocido
+    kind       TEXT    NOT NULL,  -- cancion / publicidad / programa / desconocido
     title      TEXT,
     artist     TEXT,
     album      TEXT,

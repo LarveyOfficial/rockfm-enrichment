@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import db, labels
+from . import appearance, db, labels
 from . import strings_es as S
 from .config import Config
 from .timeshift import DelayController, playout_position
@@ -58,7 +58,12 @@ class Metadata:
         return params
 
 
-def metadata_for(row: sqlite3.Row | dict, language: str, public_url: str = "") -> Metadata:
+def metadata_for(
+    row: sqlite3.Row | dict,
+    language: str,
+    public_url: str = "",
+    appearance: dict[str, dict[str, str]] | None = None,
+) -> Metadata:
     """Map a timeline row onto the two fields AzuraCast shows.
 
     Songs map naturally. Everything else borrows the pair: the Spanish label
@@ -67,8 +72,7 @@ def metadata_for(row: sqlite3.Row | dict, language: str, public_url: str = "") -
     than a blank.
     """
     item = dict(row)
-    primary, secondary = labels.render(item, language)
-    art = item.get("art_url")
+    primary, secondary, art = labels.present(item, language, appearance)
     if art and art.startswith("/") and public_url:
         art = public_url.rstrip("/") + art
 
@@ -229,7 +233,12 @@ class MetadataBridge:
         key = (row["kind"], row["title"], row["artist"], row["start_ms"])
         if key == self._last:
             return False
-        metadata = metadata_for(row, self.config.display_language, self.config.public_url)
+        metadata = metadata_for(
+            row,
+            self.config.display_language,
+            self.config.public_url,
+            appearance.load(self._db.conn, self.config.display_language),
+        )
         if self.client.push(metadata):
             self._last = key
             return True

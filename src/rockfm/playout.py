@@ -14,10 +14,10 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import db, hlsutil, labels
+from . import appearance, db, hlsutil, labels
 from . import strings_es as S
 from .config import Config
 from .dashboard import DASHBOARD_HTML
@@ -102,7 +102,9 @@ class Playout:
             raise HTTPException(status_code=404, detail="segment file missing") from None
 
         item = db.timeline_at(self.conn, pdt_ms)
-        label = labels.stream_title(dict(item) if item else {}, self.config.display_language)
+        label = labels.stream_title(
+            dict(item) if item else {}, self.config.display_language, self.appearance
+        )
         try:
             return hlsutil.rewrite_tit2(data, label)
         except Exception as exc:  # never fail playout over a metadata rewrite
@@ -111,14 +113,21 @@ class Playout:
 
     # --- now playing ---
 
-    def _render(self, item: sqlite3.Row | None) -> tuple[str, str]:
-        language = self.config.display_language
+    @property
+    def appearance(self) -> dict[str, dict[str, str]]:
+        return appearance.load(self.conn, self.config.display_language)
+
+    def _present(self, item: sqlite3.Row | None) -> tuple[str, str, str | None]:
         if item is None:
-            return S.STATION_NAME, ""
-        return labels.render(dict(item), language)
+            return S.STATION_NAME, "", None
+        return labels.present(dict(item), self.config.display_language, self.appearance)
+
+    def _render(self, item: sqlite3.Row | None) -> tuple[str, str]:
+        primary, secondary, _ = self._present(item)
+        return primary, secondary
 
     def _describe(self, item: sqlite3.Row | None, position_ms: int) -> dict:
-        primary, secondary = self._render(item)
+        primary, secondary, art = self._present(item)
         if item is None:
             return {
                 "kind": S.KIND_DESCONOCIDO,
@@ -139,7 +148,7 @@ class Playout:
             "artist": item["artist"],
             "album": item["album"],
             "year": item["year"],
-            "art": item["art_url"],
+            "art": art,
             "show": item["show_title"],
             "presenters": item["show_lead"],
             "confidence": item["confidence"],
@@ -205,8 +214,11 @@ class Playout:
     def timeline(self, start_ms: int, end_ms: int) -> list[dict]:
         """Everything the analyzer and classifier worked out over a span."""
         items = []
+        look = self.appearance
         for row in db.timeline_between(self.conn, start_ms, end_ms):
-            primary, secondary = self._render(row)
+            primary, secondary, art = labels.present(
+                dict(row), self.config.display_language, look
+            )
             items.append(
                 {
                     "start": row["start_ms"],
@@ -219,7 +231,7 @@ class Playout:
                     "artist": row["artist"],
                     "album": row["album"],
                     "year": row["year"],
-                    "art": row["art_url"],
+                    "art": art,
                     "show": row["show_title"],
                     "confidence": row["confidence"],
                     "source": row["source"],
@@ -436,6 +448,29 @@ def create_app(config: Config | None = None) -> FastAPI:
              "items": state.timeline(start_ms, end_ms)},
             headers={"Access-Control-Allow-Origin": "*"},
         )
+
+    @app.get("/api/appearance")
+    def get_appearance() -> JSONResponse:
+        return JSONResponse(
+            {
+                "configurable": list(appearance.CONFIGURABLE),
+                "fields": list(appearance.FIELDS),
+                "defaults": appearance.defaults(config.display_language),
+                "current": state.appearance,
+            },
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.put("/api/appearance")
+    async def put_appearance(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="expected a JSON object") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="expected a JSON object")
+        saved = appearance.save(state.conn, payload, config.display_language)
+        return JSONResponse({"current": saved}, headers={"Access-Control-Allow-Origin": "*"})
 
     @app.get("/api/status")
     def status() -> JSONResponse:

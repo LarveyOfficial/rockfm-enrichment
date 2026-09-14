@@ -5,8 +5,7 @@ Four signals, fused:
   repetition  heard before -> advert; genuinely new -> live talk
   speech/music  keeps an unrecognised *song* from being labelled as talk
   schedule    which programme is on air, its presenters and artwork
-  clock       news bulletins cluster at the top of the hour; the overnight
-              block is advertised as running without breaks
+  clock       the overnight block is advertised as running without breaks
 
 When the signals do not agree, prefer the vaguer label that is still true: name
 the programme rather than guess "Publicidad". A listener seeing the right show
@@ -41,7 +40,6 @@ log = logging.getLogger("rockfm.classify")
 CHUNK_MS = 15_000
 RATE = 16_000
 IDENT_MAX_MS = 20_000        # anything repeating and this short is a jingle
-NEWS_MAX_MS = 240_000        # bulletins are minutes, not half an hour
 
 
 @dataclass
@@ -86,10 +84,11 @@ class Classifier:
         no_break = self.schedule.is_no_break_block(moment)
 
         if cluster is not None and cluster.is_repeat:
-            # Heard before. During a block billed as running without adverts,
-            # a repeat is far more likely to be a station ident.
+            # Heard before. During a block the station bills as running without
+            # adverts, a repeat is more likely a promo for one of its own
+            # programmes, so name the show instead of crying advert.
             if no_break:
-                return S.KIND_SINTONIA, 0.6
+                return S.KIND_PROGRAMA, 0.5
             return S.KIND_PUBLICIDAD, 0.75
 
         if audio_kind == MUSIC:
@@ -97,8 +96,6 @@ class Classifier:
             return S.KIND_DESCONOCIDO, 0.4
 
         if audio_kind == SPEECH:
-            if self.schedule.is_news_window(moment):
-                return S.KIND_NOTICIAS, 0.55
             return S.KIND_PROGRAMA, 0.6
 
         # No usable speech/music reading and nothing familiar: name the show.
@@ -144,12 +141,6 @@ class Classifier:
             else:
                 merged.append(chunk)
         return merged
-
-    def _refine(self, chunk: Chunk) -> Chunk:
-        span = chunk.end_ms - chunk.start_ms
-        if chunk.kind == S.KIND_NOTICIAS and span > NEWS_MAX_MS:
-            chunk.kind = S.KIND_PROGRAMA
-        return chunk
 
     def _commit(self, chunk: Chunk) -> None:
         programme = self._programme(chunk.start_ms)
@@ -227,7 +218,7 @@ class Classifier:
                 self._commit_short(row)
                 handled += 1
                 continue
-            chunks = [self._refine(c) for c in self._merge(self._chunks(row["start_ms"], row["end_ms"]))]
+            chunks = self._merge(self._chunks(row["start_ms"], row["end_ms"]))
             if not chunks:
                 continue
             for chunk in chunks:

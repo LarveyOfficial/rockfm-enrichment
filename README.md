@@ -41,6 +41,10 @@ answer is then learned from the broadcast itself — so a song costs about one
 external call the first time it airs and nothing afterwards. Measured on live
 radio: 16 calls on a cold index, 0 on a warm one over the same audio.
 
+**Four kinds, all of them things we can establish:** a song we identified,
+audio we have heard before (`publicidad`), someone talking (`programa`), and
+none of the above (`desconocido`).
+
 **Adverts vs DJ talk.** Adverts repeat; a presenter talking never does. Non-song audio is fingerprinted into a second index, so anything heard
 before is an advert or an ident and anything genuinely new is live talk. A
 trained speech/music model keeps an unrecognised *song* from being mistaken for
@@ -82,6 +86,14 @@ directly, and Docker runs the check normally.
 Then point a player at `http://<host>:8080/hls/playlist.m3u8`, or open
 `http://<host>:8080/` for a small web player. On Unraid, use
 `unraid-template.xml`.
+
+### Appearance
+
+Songs carry their own title, artist and cover. Everything else has nothing of
+its own, so what a player shows for adverts, presenter talk and unrecognised
+audio is set from the dashboard's **Appearance** panel and stored in the
+database. Leave a field blank to keep the built-in answer -- the real programme
+name and artwork for presenter talk, the station name for anything unrecognised.
 
 ### The dashboard
 

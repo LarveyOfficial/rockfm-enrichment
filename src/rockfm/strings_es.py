@@ -1,8 +1,9 @@
 """Display strings, Spanish by default.
 
-The station is Spanish and so is everything it says between songs, so ads, DJ
-talk and news are labelled in Spanish. Strings live here rather than inline so
-another language can be dropped in without touching classification logic.
+The station is Spanish and so is everything it says between songs, so adverts
+and presenter talk are labelled in Spanish. These are only the built-in
+defaults: what each kind actually shows is configurable and lives in the
+database, see appearance.py.
 """
 
 from __future__ import annotations
@@ -12,18 +13,15 @@ from typing import Final
 KIND_CANCION: Final = "cancion"
 KIND_PUBLICIDAD: Final = "publicidad"
 KIND_PROGRAMA: Final = "programa"
-KIND_NOTICIAS: Final = "noticias"
-KIND_SINTONIA: Final = "sintonia"
 KIND_DESCONOCIDO: Final = "desconocido"
 
-ALL_KINDS: Final = (
-    KIND_CANCION,
-    KIND_PUBLICIDAD,
-    KIND_PROGRAMA,
-    KIND_NOTICIAS,
-    KIND_SINTONIA,
-    KIND_DESCONOCIDO,
-)
+# Four kinds, and every one of them is something we can actually establish: a
+# song we identified, audio we have heard before, someone talking, or none of
+# the above. Earlier versions also had "noticias" and "sintonia", but nothing
+# detected them -- they were guesses from the clock (top of the hour must be
+# news; a repeat during the overnight block must be an ident) dressed up as
+# findings. Rows written by those versions still render, as desconocido.
+ALL_KINDS: Final = (KIND_CANCION, KIND_PUBLICIDAD, KIND_PROGRAMA, KIND_DESCONOCIDO)
 
 STATION_NAME: Final = "RockFM"
 
@@ -31,9 +29,6 @@ ES: Final[dict[str, str]] = {
     "station": STATION_NAME,
     "publicidad.primary": "Publicidad",
     "publicidad.secondary": "Volvemos enseguida",
-    "noticias.primary": "Noticias",
-    "noticias.secondary": "RockFM Noticias",
-    "sintonia.primary": STATION_NAME,
     "desconocido.primary": STATION_NAME,
     "programa.secondary_fallback": "En directo",
     "now_playing": "Sonando ahora",
@@ -46,9 +41,6 @@ EN: Final[dict[str, str]] = {
     "station": STATION_NAME,
     "publicidad.primary": "Advertisements",
     "publicidad.secondary": "Back shortly",
-    "noticias.primary": "News",
-    "noticias.secondary": "RockFM News",
-    "sintonia.primary": STATION_NAME,
     "desconocido.primary": STATION_NAME,
     "programa.secondary_fallback": "Live",
     "now_playing": "Now playing",

@@ -1,8 +1,9 @@
 """What is scheduled to be on air, in the station's own timezone.
 
 Used to name non-music stretches ("El Pirata y su banda" rather than a blank),
-and to supply classification priors -- news clusters at the top of the hour, and
-the overnight block is billed as an hour of rock without breaks.
+and to supply one classification prior: the overnight block is billed as an
+hour of rock without breaks, so a repeat during it is more likely a programme
+promo than an advert.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from .rockfm_api import Programme, RockFmApi
 log = logging.getLogger("rockfm.schedule")
 
 REFRESH_SECONDS = 6 * 3600
-NEWS_WINDOW_MINUTES = 5  # bulletins sit at the top of the hour
 NO_BREAK_MARKERS = ("sin pausa", "sin publicidad")
 
 
@@ -60,9 +60,6 @@ class Schedule:
         # Longer entries are the main show; a shorter overlapping one is more specific.
         candidates.sort(key=lambda p: p.end_minute - p.start_minute)
         return candidates[0]
-
-    def is_news_window(self, moment: datetime) -> bool:
-        return moment.minute < NEWS_WINDOW_MINUTES
 
     def is_no_break_block(self, moment: datetime) -> bool:
         """True during blocks the station advertises as running without adverts."""

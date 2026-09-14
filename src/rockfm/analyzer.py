@@ -74,6 +74,14 @@ DURATION_DISAGREEMENT = 0.35
 OFFSET_TRUST_MS = 15_000
 # How much a still-growing run must gain before its reference is refreshed.
 RELEARN_GROWTH_MS = 90_000
+# The coarse scan steps 24s, so a song can end up to a step past its last
+# matching probe. The reference is learned from that probe extent, and the edge
+# search cannot confirm a song beyond what the reference covers -- so the end
+# landed systematically early, and the song's tail leaked into whatever came
+# next. Walking the extent out in finer steps first costs a few probes and
+# removes the bias.
+EXTEND_STEP_MS = 6_000
+EXTEND_LIMIT_MS = 24_000
 BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
 # Windows must comfortably hold several songs. At five minutes a single track
@@ -508,6 +516,41 @@ class Analyzer:
 
         return merged
 
+    def _extend_run(self, window: Window, run: Run) -> None:
+        """Find where a run really reaches, not where the 24s grid landed.
+
+        The scan only asks every 24 seconds, so a song's last matching probe can
+        sit a full step short of its actual end. Everything downstream inherits
+        that: the reference is learned from this extent, and the edge search
+        cannot confirm the song past what the reference covers. Stepping out in
+        six second increments until identification stops costs a handful of
+        probes -- local ones, once the song is known -- and removes the bias.
+        """
+        if run.key is None:
+            return
+
+        reach = run.last_ms
+        while reach - run.last_ms < EXTEND_LIMIT_MS:
+            candidate = reach + EXTEND_STEP_MS
+            if not window.covers(candidate):
+                break
+            found = self._identify(window, candidate)
+            if found is None or found.key != run.key:
+                break
+            reach = candidate
+        run.last_ms = reach
+
+        start = run.first_ms
+        while run.first_ms - start < EXTEND_LIMIT_MS:
+            candidate = start - EXTEND_STEP_MS
+            if candidate < window.start_ms or not window.covers(candidate):
+                break
+            found = self._identify(window, candidate)
+            if found is None or found.key != run.key:
+                break
+            start = candidate
+        run.first_ms = start
+
     def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Teach a span, unless this window already taught one covering it."""
         if run.key is None or run.key in self._settled:
@@ -560,6 +603,9 @@ class Analyzer:
         # identified it as a reference the answer was no almost everywhere, so
         # the boundary collapsed onto the last coarse probe -- which is what
         # pinned every song to a multiple of the scan step.
+        for run in runs:
+            self._extend_run(window, run)
+
         for position, run in enumerate(runs):
             if run.key is None:
                 continue

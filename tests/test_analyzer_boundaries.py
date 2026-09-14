@@ -372,3 +372,29 @@ def test_a_longer_reference_still_wins(tmp_path):
     analyzer._relearn = lambda w, r, a, b: attempted.append((a, b))
     analyzer._learn_once(None, run, 0, 210_000)
     assert attempted == [(0, 210_000)]
+
+
+def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
+    """The scan asks every 24s, so a song's last matching probe can sit a full
+    step short of where it actually ends. Everything downstream inherits that."""
+    from rockfm.analyzer import EXTEND_STEP_MS, Run
+
+    analyzer = build(tmp_path)
+    analyzer._identify = lambda _w, at: (
+        Label(key=song_at(played, at), artist="x", title="t", source="s",
+              confidence=1.0, track_id=1)
+        if song_at(played, at) else None
+    )
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    true_end = SONGS[0][1] * 1000
+    # A run that stopped short, as the 24s grid leaves it.
+    run = Run(key="foreigner", label=None, first_ms=0, last_ms=true_end - 20_000)
+    run.label = Label(key="foreigner", artist="x", title="t", source="s",
+                      confidence=1.0, track_id=1)
+
+    analyzer._extend_run(window, run)
+    assert run.last_ms > true_end - 20_000, "the run never reached out"
+    assert run.last_ms <= true_end, "it reached past the end of the song"
+    assert true_end - run.last_ms < EXTEND_STEP_MS + 1

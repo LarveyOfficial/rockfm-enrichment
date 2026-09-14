@@ -515,67 +515,12 @@ def test_a_failing_recogniser_is_not_asked_to_extend(tmp_path):
     assert calls == []
 
 
-def _gate_analyzer(tmp_path, verdict):
-    """An analyzer whose local index never answers, so every probe goes out."""
-    analyzer = build(tmp_path)
-    analyzer._local = lambda _w, at, min_score=0.0: None
-    analyzer._gate = type("G", (), {"classify": lambda _s, _p, _r: verdict})()
-    return analyzer
-
-
-def test_speech_is_not_sent_to_a_music_recogniser(tmp_path):
-    """Three network calls to ask whether presenter talk is a song.
-
-    On a talk-led morning show that is most of the probes in a window, and it
-    is why the scan fell behind the stream feeding it: each probe covered 24s
-    of audio and took 27s to do it.
-    """
-    from rockfm.classify.segmenter import MUSIC, SPEECH
-
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
-
-    speech = _gate_analyzer(tmp_path, SPEECH)
-    calls: list[int] = []
-    speech._external = lambda _w, at: calls.append(at)
-    assert speech._identify(window, 60_000) is None
-    assert calls == [], "talk was sent to a music recogniser"
-
-    # Anything the gate does not call speech must still go out, retries and all.
-    music = _gate_analyzer(tmp_path, MUSIC)
-    heard: list[int] = []
-
-    def external(_w, at):
-        heard.append(at)
-        return None
-
-    music._external = external
-    assert music._identify(window, 60_000) is None
-    assert len(heard) > 1
-
-
-def test_the_speech_gate_can_be_turned_off(tmp_path):
-    from rockfm import settings
-    from rockfm.classify.segmenter import SPEECH
-
-    analyzer = _gate_analyzer(tmp_path, SPEECH)
-    settings.save(analyzer.conn, {"skip_lookups_for_speech": False})
-
-    calls: list[int] = []
-    analyzer._external = lambda _w, at: calls.append(at)
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer._identify(Window(0, MIN_WINDOW_MS, samples), 60_000)
-    assert calls != []
-
-
 def test_a_presenter_over_the_outro_does_not_end_the_song(tmp_path):
-    """The speech check belongs to the scan, not to extension.
+    """Nothing may stand between a probe and the recogniser.
 
-    The scan asks an open question -- is anything playing here? -- and speech
-    is a fair answer. Extension asks whether one known song is still running,
-    and there a DJ talking over the outro reads as speech while the song plays
-    on underneath. Applying the check there ended songs at the talk-over: Stand
-    By Me was cut thirteen seconds short.
+    A cheap speech check once did, and on a track the recogniser names at every
+    offset it called the intro and the outro speech -- the exact audio the
+    edges are decided from. A probe it dropped was a song nobody heard about.
     """
     from rockfm.analyzer import Run
     from rockfm.recognize.base import Recognition
@@ -590,7 +535,6 @@ def test_a_presenter_over_the_outro_does_not_end_the_song(tmp_path):
     analyzer._external = external
     analyzer._ground_reference = lambda _w, _r: None
     analyzer._same_track = lambda _w, at, key, s=0.0: False
-    analyzer._is_speech = lambda _w, _at: True          # someone is talking
 
     run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
     run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
@@ -650,3 +594,33 @@ def test_an_edge_records_why_it_stopped(tmp_path):
 
     # Walked the whole way and was still going.
     assert extend(lambda _w, at, key, s=0.0: True).end_stopped == "limit"
+
+
+def test_a_local_miss_always_reaches_the_recogniser(tmp_path):
+    """Nothing may sit between a probe and the recogniser.
+
+    A cheap speech check sat there once, to save calls on presenter talk. On a
+    Mr. Big track the recogniser names at every offset, it read two probes as
+    speech -- ratios of 0.88 and 1.00 -- and they were the intro and the outro,
+    the audio the edges are decided from. Meanwhile the analyzer filed ninety
+    five seconds of that song as a gap. Anything that can silently drop a probe
+    can silently drop a song.
+    """
+    analyzer = build(tmp_path)
+    analyzer._local = lambda _w, at, min_score=0.0: None
+
+    asked: list[int] = []
+    analyzer._external = lambda _w, at: asked.append(at)
+
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer._identify(Window(0, MIN_WINDOW_MS, samples), 60_000)
+
+    assert asked, "a probe the index could not name never reached the recogniser"
+
+
+def test_nothing_imports_a_speech_segmenter() -> None:
+    """The module is gone; an import would mean the gate is creeping back."""
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("rockfm.classify.segmenter")

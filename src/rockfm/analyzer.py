@@ -40,7 +40,6 @@ from . import db, fingerprint, settings
 from . import strings_es as S
 from .audio import ANALYSIS_RATE
 from .buffer import BufferReader
-from .classify import segmenter as seg
 from .config import Config
 from .enrich import Enricher
 from .fingerprint import FingerprintIndex
@@ -243,10 +242,6 @@ class Analyzer:
         self._held = False
         # Why the edge being extended stopped, filled in as it happens.
         self._why = ""
-        # Pure numpy, ~0.2ms per probe. Deliberately not the CNN: this runs on
-        # every probe that misses locally, and it only has to be right when it
-        # is certain.
-        self._gate = seg.LightSegmenter()
 
     # --- cursor ---
 
@@ -295,28 +290,6 @@ class Analyzer:
             return None
         self.external_calls += 1
         return self.recognizer.recognize(probe, RECOGNIZE_RATE)
-
-    def _is_speech(self, window: Window, at_ms: int) -> bool:
-        """Is this probe clearly not music, and so not worth a music lookup?
-
-        Asking a music recogniser about presenter talk costs three network calls
-        -- a miss, then both retry offsets -- and the answer was never going to
-        be a song. On a talk-led morning show that is most of the probes in a
-        window, which is why the scan could not keep pace with the stream that
-        fed it.
-
-        The reading has to be free and it has to abstain. LightSegmenter is
-        both: no model to load, and it reports speech only above a threshold it
-        is biased against reaching, so anything ambiguous still goes out to the
-        recogniser. Being wrong here costs one missed identification of a song
-        the local index will learn on its next airing anyway.
-        """
-        if not settings.load(self.conn)["skip_lookups_for_speech"]:
-            return False
-        probe = window.probe8(at_ms)
-        if probe.size == 0:
-            return False
-        return self._gate.classify(probe, ANALYSIS_RATE) == seg.SPEECH
 
     def _recognizer_degraded(self) -> bool:
         return bool(getattr(self.recognizer, "degraded", False))
@@ -526,9 +499,7 @@ class Analyzer:
 
     # --- main pass ---
 
-    def _identify(
-        self, window: Window, at_ms: int, *, retry: bool = True, gate: bool = True
-    ) -> Label | None:
+    def _identify(self, window: Window, at_ms: int, *, retry: bool = True) -> Label | None:
         """Name the audio at `at_ms`, independently of any neighbouring probe.
 
         `retry` is for callers who are asking a question a miss already answers.
@@ -536,12 +507,12 @@ class Analyzer:
         miss writes off a whole 24s stretch -- but not where the miss is the
         expected result.
 
-        `gate` skips the speech check. It belongs to the scan, which is asking
-        the open question "is anything playing here?", and speech is a fair
-        answer to that. It does not belong to a caller asking whether one known
-        song is still running: a presenter talking over an outro reads as speech
-        while the song plays on underneath, and ending the song there is the
-        error the check would cause.
+        Nothing stands between a probe and the recogniser. A cheap speech check
+        used to, to save calls on presenter talk, and it cost far more than it
+        saved: on a Mr. Big track the recogniser names at every offset, it read
+        two probes as speech -- ratios of 0.88 and 1.00 -- and both were the
+        song's intro and outro, the exact audio the edges are decided from. A
+        probe it drops is a song we never hear about.
         """
         match = self._local(window, at_ms)
         if match is not None:
@@ -554,9 +525,6 @@ class Analyzer:
                 confidence=_confidence(match),
                 track_id=match.track_id,
             )
-
-        if gate and self._is_speech(window, at_ms):
-            return None
 
         found = self._external(window, at_ms)
         if found is None and retry and not self._recognizer_degraded():
@@ -820,7 +788,7 @@ class Analyzer:
             self._why = "recogniser down"
             return False
         budget[0] -= 1
-        found = self._identify(window, at_ms, retry=False, gate=False)
+        found = self._identify(window, at_ms, retry=False)
         if found is None:
             self._why = "nothing there"
             return False

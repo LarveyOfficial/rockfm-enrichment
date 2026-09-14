@@ -7,7 +7,7 @@ through, which is a steep price for a typo.
 
 What stays in the environment is what genuinely cannot change without a restart
 or a rebuild: where the data lives, how much of it to keep, which recogniser and
-segmenter to load, and the timezone the delay is computed against.
+and the timezone the delay is computed against.
 
 Stored as JSON in the meta table, so no migration is needed. An environment
 variable still seeds a setting the first time, so an existing deployment keeps
@@ -45,10 +45,6 @@ FIELDS: Final[dict[str, tuple[Any, str, str]]] = {
     # a local match that takes twenty-seven milliseconds. Raise it only if a
     # recogniser is observed refusing calls.
     "recognizer_interval_seconds": (0.0, "RECOGNIZER_INTERVAL_SECONDS", "number"),
-    # Skip the external music lookup for audio that is plainly speech. Costs
-    # 0.2ms to decide and saves three network calls that were never going to
-    # name a song. Turn off if songs are being missed over talk-heavy intros.
-    "skip_lookups_for_speech": (True, "SKIP_LOOKUPS_FOR_SPEECH", "bool"),
     "min_nonmusic_seconds": (5.0, "MIN_NONMUSIC_SECONDS", "number"),
     "max_seam_seconds": (10.0, "MAX_SEAM_SECONDS", "number"),
     "azuracast_enabled": (False, "", "bool"),

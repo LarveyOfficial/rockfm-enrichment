@@ -19,6 +19,8 @@ import httpx
 log = logging.getLogger("rockfm.api")
 
 BASE_URL = "https://www.rockfm.fm"
+# The station's own fallback artwork, from cfg.failBackEmision in /ply/prg.
+STATION_ART = f"{BASE_URL}/uploads/2024/09/17/66e9c28850691.jpeg"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": f"{BASE_URL}/"}
 
 

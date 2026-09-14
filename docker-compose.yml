@@ -7,17 +7,14 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
+    # Only what cannot change while running. Everything else -- the AzuraCast
+    # integration, public URL, display language, classification thresholds --
+    # is configured from the dashboard and stored in the database, so changing
+    # it never costs a hole in the recording.
     environment:
       LOCAL_TZ: America/New_York
       BUFFER_HOURS: "24"
+      SEED_ON_START: "true"
       RECOGNIZER: shazamio
       SEGMENTER: ina
-      DISPLAY_LANGUAGE: es
-      # Point this at how listeners reach the container, so artwork URLs
-      # handed to AzuraCast are absolute.
-      # PUBLIC_URL: http://unraid.local:8080
-      # AZURACAST_BASE_URL: https://azuracast.example.com
-      # AZURACAST_STATION_ID: "1"
-      # AZURACAST_API_KEY: ""
-      # AZURACAST_DJ_URL: azuracast.example.com:8005/
-      # AZURACAST_DJ_PASSWORD: ""
+      AZURACAST_DJ_CODEC: mp3

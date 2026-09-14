@@ -23,7 +23,11 @@
     &#13;
     NOTE: with the default six hour delay there is nothing to play for the first
     six hours after a fresh start. That is the buffer filling, not a fault - the
-    dashboard shows a countdown, and the health check stays green throughout.
+    dashboard shows a countdown, and the health check stays green throughout.&#13;
+    &#13;
+    Everything else is configured from the dashboard rather than here, including
+    the whole AzuraCast integration - restarting to change a setting would tear a
+    hole in the recording and discard whatever the analyzer was part way through.
   </Overview>
   <Category>MediaApp:Music Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/dashboard</WebUI>
@@ -52,9 +56,6 @@
           Description="Hours of audio kept on disk. Must exceed the delay; 24 leaves room to rewind and to ride out an outage. Roughly 29 MB per hour."
           Type="Variable" Display="always" Required="false" Mask="false">24</Config>
 
-  <Config Name="Public URL" Target="PUBLIC_URL" Default=""
-          Description="How listeners reach this container, e.g. http://tower.local:8080 . Used to make artwork URLs absolute for AzuraCast."
-          Type="Variable" Display="always" Required="false" Mask="false"></Config>
 
   <Config Name="Recognizer" Target="RECOGNIZER" Default="shazamio"
           Description="shazamio (free, no key, unofficial), audd or acrcloud. The local fingerprint index handles repeat plays, so this is only consulted for audio never heard before."
@@ -64,37 +65,16 @@
           Description="ina uses a trained CNN and is accurate but needs about 1 GB of RAM. light is dependency-free and abstains when unsure."
           Type="Variable" Display="advanced" Required="false" Mask="false">ina</Config>
 
-  <Config Name="Min Non-Music Seconds" Target="MIN_NONMUSIC_SECONDS" Default="5"
-          Description="Non-song stretches shorter than this are left alone rather than being called an advert or presenter talk. Station jingles run about two seconds and fit no useful category."
-          Type="Variable" Display="advanced" Required="false" Mask="false">5</Config>
 
-  <Config Name="Display Language" Target="DISPLAY_LANGUAGE" Default="es"
-          Description="Language for advert, news and programme labels. es or en."
-          Type="Variable" Display="advanced" Required="false" Mask="false">es</Config>
 
   <Config Name="Seed On Start" Target="SEED_ON_START" Default="true"
           Description="Build the fingerprint index from RockFM's rotation catalog on first run. Takes about 20 minutes in the background and only happens once."
           Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
 
-  <Config Name="AzuraCast Base URL" Target="AZURACAST_BASE_URL" Default=""
-          Description="e.g. https://azuracast.example.com . Leave blank to skip the AzuraCast integration entirely."
-          Type="Variable" Display="always" Required="false" Mask="false"></Config>
 
-  <Config Name="AzuraCast Station ID" Target="AZURACAST_STATION_ID" Default=""
-          Description="Numeric station ID. The station must use the Liquidsoap backend; a relay-only station cannot accept metadata updates."
-          Type="Variable" Display="always" Required="false" Mask="false"></Config>
 
-  <Config Name="AzuraCast API Key" Target="AZURACAST_API_KEY" Default=""
-          Description="Needs the station's Broadcasting permission."
-          Type="Variable" Display="always" Required="false" Mask="true"></Config>
 
-  <Config Name="AzuraCast DJ URL" Target="AZURACAST_DJ_URL" Default=""
-          Description="Host, port and mount for the live source, e.g. azuracast.example.com:8005/ . Leave blank to serve HLS only."
-          Type="Variable" Display="always" Required="false" Mask="false"></Config>
 
-  <Config Name="AzuraCast DJ Password" Target="AZURACAST_DJ_PASSWORD" Default=""
-          Description="Streamer/DJ password for that mount."
-          Type="Variable" Display="always" Required="false" Mask="true"></Config>
 
   <Config Name="AzuraCast DJ Codec" Target="AZURACAST_DJ_CODEC" Default="mp3"
           Description="mp3 re-encodes at 192k and is the safest. copy passes the original AAC through untouched, if your harbour accepts it."

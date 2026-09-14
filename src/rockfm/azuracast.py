@@ -31,9 +31,10 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import appearance, db, labels
+from . import appearance, db, labels, settings
 from . import strings_es as S
 from .config import Config
+from .rockfm_api import STATION_ART
 from .timeshift import DelayController, playout_position
 
 log = logging.getLogger("rockfm.azuracast")
@@ -87,31 +88,46 @@ def metadata_for(
 
 
 class MetadataClient:
-    def __init__(self, config: Config, timeout: float = 15.0) -> None:
+    """Talks to AzuraCast using whatever the settings currently say.
+
+    Settings are read per call rather than captured at construction, so turning
+    the integration on, off, or repointing it at another station takes effect
+    without a restart -- which would otherwise cost a hole in the recording.
+    """
+
+    def __init__(self, config: Config, database: db.ThreadLocalDB, timeout: float = 15.0) -> None:
         self.config = config
-        self.client = httpx.Client(
-            timeout=timeout,
-            headers={"X-API-Key": config.azuracast_api_key},
-            follow_redirects=True,
-        )
+        self._db = database
+        self.client = httpx.Client(timeout=timeout, follow_redirects=True)
+
+    @property
+    def settings(self) -> dict:
+        return settings.load(self._db.conn)
 
     @property
     def configured(self) -> bool:
+        current = self.settings
         return bool(
-            self.config.azuracast_base_url
-            and self.config.azuracast_station_id
-            and self.config.azuracast_api_key
+            current["azuracast_enabled"]
+            and current["azuracast_base_url"]
+            and current["azuracast_station_id"]
+            and current["azuracast_api_key"]
         )
 
-    def _url(self, path: str) -> str:
-        return f"{self.config.azuracast_base_url.rstrip('/')}{path}"
+    def _url(self, current: dict, path: str) -> str:
+        return f"{current['azuracast_base_url'].rstrip('/')}{path}"
 
     def push(self, metadata: Metadata) -> bool:
+        current = self.settings
         if not self.configured:
             return False
-        path = f"/api/station/{self.config.azuracast_station_id}/nowplaying/update"
+        path = f"/api/station/{current['azuracast_station_id']}/nowplaying/update"
         try:
-            response = self.client.post(self._url(path), params=metadata.as_params())
+            response = self.client.post(
+                self._url(current, path),
+                params=metadata.as_params(),
+                headers={"X-API-Key": current["azuracast_api_key"]},
+            )
             response.raise_for_status()
         except httpx.HTTPError as exc:
             log.warning("metadata push failed: %s", exc)
@@ -119,12 +135,38 @@ class MetadataClient:
         log.info("pushed: %s - %s", metadata.artist, metadata.title)
         return True
 
+    def push_regardless(self, metadata: Metadata) -> bool:
+        """Push even though the integration is now off.
+
+        Used once, on the way out, so the station is not left displaying a song
+        that stopped being true the moment we stopped updating it.
+        """
+        current = self.settings
+        if not (current["azuracast_base_url"] and current["azuracast_station_id"]
+                and current["azuracast_api_key"]):
+            return False
+        path = f"/api/station/{current['azuracast_station_id']}/nowplaying/update"
+        try:
+            response = self.client.post(
+                self._url(current, path),
+                params=metadata.as_params(),
+                headers={"X-API-Key": current["azuracast_api_key"]},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("could not restore the station identity: %s", exc)
+            return False
+        return True
+
     def now_playing(self) -> dict | None:
+        current = self.settings
         if not self.configured:
             return None
-        path = f"/api/nowplaying/{self.config.azuracast_station_id}"
+        path = f"/api/nowplaying/{current['azuracast_station_id']}"
         try:
-            response = self.client.get(self._url(path))
+            response = self.client.get(
+                self._url(current, path), headers={"X-API-Key": current["azuracast_api_key"]}
+            )
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as exc:
@@ -153,24 +195,38 @@ class MetadataClient:
 
 
 class SourcePusher:
-    """Keeps an ffmpeg process shipping our delayed HLS to AzuraCast."""
+    """Keeps an ffmpeg process shipping our delayed HLS to AzuraCast.
 
-    def __init__(self, config: Config) -> None:
+    Watches the settings: switching the integration off stops the source, and
+    switching it on starts one, without restarting the container.
+    """
+
+    def __init__(self, config: Config, database: db.ThreadLocalDB) -> None:
         self.config = config
+        self._db = database
         self.stop_event = threading.Event()
         self._process: subprocess.Popen | None = None
 
     @property
-    def configured(self) -> bool:
-        return bool(self.config.azuracast_dj_url and self.config.azuracast_dj_password)
+    def settings(self) -> dict:
+        return settings.load(self._db.conn)
 
-    def _source_url(self) -> str:
+    @property
+    def configured(self) -> bool:
+        current = self.settings
+        return bool(
+            current["azuracast_enabled"]
+            and current["azuracast_dj_url"]
+            and current["azuracast_dj_password"]
+        )
+
+    def _source_url(self, current: dict) -> str:
         # icecast://source:password@host:port/mount
-        target = self.config.azuracast_dj_url
+        target = current["azuracast_dj_url"]
         scheme, _, rest = target.partition("://")
         if not rest:
             rest, scheme = scheme, "icecast"
-        return f"icecast://source:{self.config.azuracast_dj_password}@{rest}"
+        return f"icecast://source:{current['azuracast_dj_password']}@{rest}"
 
     def command(self) -> list[str]:
         local = f"http://127.0.0.1:{self.config.http_port}/hls/playlist.m3u8"
@@ -187,22 +243,32 @@ class SourcePusher:
                 "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                 "-content_type", "audio/mpeg", "-f", "mp3",
             ]
-        return args + [self._source_url()]
+        return args + [self._source_url(self.settings)]
 
     def run(self) -> None:
-        if not self.configured:
-            log.info("no AzuraCast DJ target configured; not pushing audio")
-            return
+        announced = False
         while not self.stop_event.is_set():
+            if not self.configured:
+                if not announced:
+                    log.info("AzuraCast audio push is off; waiting for it to be enabled")
+                    announced = True
+                self.stop_event.wait(POLL_SECONDS * 2)
+                continue
+
+            announced = False
             log.info("connecting to AzuraCast as a live source")
             try:
                 self._process = subprocess.Popen(self.command())
-                self._process.wait()
+                while self._process.poll() is None:
+                    if self.stop_event.is_set() or not self.configured:
+                        log.info("AzuraCast audio push disabled; disconnecting")
+                        self._process.terminate()
+                        break
+                    self.stop_event.wait(POLL_SECONDS)
             except Exception as exc:
                 log.warning("source push failed: %s", exc)
             if self.stop_event.is_set():
                 break
-            log.warning("source disconnected; retrying in %.0fs", RESTART_DELAY)
             self.stop_event.wait(RESTART_DELAY)
 
     def stop(self) -> None:
@@ -211,33 +277,57 @@ class SourcePusher:
             self._process.terminate()
 
 
+def station_metadata() -> Metadata:
+    """What to leave on the station when we stop driving its metadata.
+
+    Switching the integration off should not freeze AzuraCast on whatever song
+    happened to be playing at the time. Hand it back the station's own identity
+    and let it be.
+    """
+    return Metadata(title=S.STATION_NAME, artist="", art=STATION_ART)
+
+
 class MetadataBridge:
     """Watches what is airing and pushes each change to AzuraCast."""
 
     def __init__(self, config: Config, database: db.ThreadLocalDB) -> None:
         self.config = config
         self._db = database
-        self.client = MetadataClient(config)
+        self.client = MetadataClient(config, database)
         self.delay = DelayController(config)
         self.stop_event = threading.Event()
         self._last: tuple | None = None
+        self._was_enabled = False
 
     def current(self) -> sqlite3.Row | None:
         position = playout_position(self.config, self.delay.current)
         return db.timeline_at(self._db.conn, position)
 
     def tick(self) -> bool:
+        enabled = self.client.configured
+        if not enabled:
+            if self._was_enabled:
+                # Turned off just now: hand the station back its own identity
+                # rather than leaving it frozen on the last song we pushed.
+                log.info("AzuraCast metadata push disabled; restoring the station identity")
+                self._was_enabled = False
+                self._last = None
+                self.client.push_regardless(station_metadata())
+            return False
+
+        self._was_enabled = True
         row = self.current()
         if row is None:
             return False
         key = (row["kind"], row["title"], row["artist"], row["start_ms"])
         if key == self._last:
             return False
+        current = settings.load(self._db.conn)
         metadata = metadata_for(
             row,
-            self.config.display_language,
-            self.config.public_url,
-            appearance.load(self._db.conn, self.config.display_language),
+            current["display_language"],
+            current["public_url"],
+            appearance.load(self._db.conn, current["display_language"]),
         )
         if self.client.push(metadata):
             self._last = key
@@ -245,9 +335,6 @@ class MetadataBridge:
         return False
 
     def run(self) -> None:
-        if not self.client.configured:
-            log.info("no AzuraCast API target configured; not pushing metadata")
-            return
         log.info("metadata bridge started")
         while not self.stop_event.is_set():
             try:
@@ -268,8 +355,9 @@ def main() -> None:
     if not shutil.which("ffmpeg"):
         log.error("ffmpeg not found on PATH")
 
-    bridge = MetadataBridge(config, db.ThreadLocalDB(config.db_path))
-    pusher = SourcePusher(config)
+    database = db.ThreadLocalDB(config.db_path)
+    bridge = MetadataBridge(config, database)
+    pusher = SourcePusher(config, database)
 
     def handle(signum, _frame):
         log.info("signal %s received; shutting down", signum)

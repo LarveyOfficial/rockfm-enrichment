@@ -113,12 +113,17 @@ def test_a_real_break_is_still_classified(classifier, monkeypatch):
     assert seen == [(now, now + 90_000)]
 
 
-def test_the_floor_is_configurable(tmp_path):
+def test_the_floor_is_configurable_at_runtime(tmp_path):
+    """Changing it on the dashboard must take effect without a restart."""
     from rockfm import db as database
+    from rockfm import settings
     from rockfm.config import Config
 
-    config = Config(data_dir=tmp_path, min_nonmusic_seconds=20.0)
+    config = Config(data_dir=tmp_path)
     config.ensure_dirs()
     conn = database.connect(config.db_path)
     classifier = Classifier(config, conn, schedule=FakeSchedule(), segmenter=object())
+    assert classifier.min_nonmusic_ms == 5_000
+
+    settings.save(conn, {"min_nonmusic_seconds": 20})
     assert classifier.min_nonmusic_ms == 20_000

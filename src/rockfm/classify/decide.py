@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from .. import db
+from .. import db, settings
 from .. import strings_es as S
 from ..buffer import BufferReader
 from ..config import Config
@@ -65,7 +65,11 @@ class Classifier:
         self.schedule = schedule or Schedule()
         self.segmenter = segmenter if segmenter is not None else build_segmenter(config.segmenter)
         self.repetition = RepetitionIndex(conn)
-        self.min_nonmusic_ms = int(config.min_nonmusic_seconds * 1000)
+
+    @property
+    def min_nonmusic_ms(self) -> int:
+        """Read per pass, so changing it on the dashboard takes effect at once."""
+        return int(settings.load(self.conn)["min_nonmusic_seconds"] * 1000)
 
     # --- helpers ---
 

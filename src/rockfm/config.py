@@ -1,6 +1,10 @@
-"""Environment-driven configuration.
+"""Environment configuration: the things that cannot change while running.
 
-Every knob is an env var so the Unraid template can expose it directly.
+Where the data lives, how much to keep, which recogniser and segmenter to load,
+and the timezone the delay is computed against. Everything else -- the AzuraCast
+integration, display language, public URL, classification thresholds -- is a
+runtime setting stored in the database and edited from the dashboard, because
+restarting to change it would tear a hole in the recording. See settings.py.
 """
 
 from __future__ import annotations
@@ -64,26 +68,16 @@ class Config:
     http_host: str = field(default_factory=lambda: _env("HTTP_HOST", "0.0.0.0"))
     http_port: int = field(default_factory=lambda: _int("HTTP_PORT", 8080))
     playlist_segments: int = field(default_factory=lambda: _int("PLAYLIST_SEGMENTS", 6))
-    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL", ""))
 
     # --- recognition / classification ---
     recognizer: str = field(default_factory=lambda: _env("RECOGNIZER", "shazamio"))
     segmenter: str = field(default_factory=lambda: _env("SEGMENTER", "ina"))
-    # Non-song stretches shorter than this are not worth a verdict. Station
-    # jingles run a couple of seconds and sit between tracks; calling them
-    # adverts is worse than saying nothing about them.
-    min_nonmusic_seconds: float = field(
-        default_factory=lambda: _float("MIN_NONMUSIC_SECONDS", 5.0)
-    )
-    display_language: str = field(default_factory=lambda: _env("DISPLAY_LANGUAGE", "es"))
     seed_on_start: bool = field(default_factory=lambda: _bool("SEED_ON_START", True))
 
     # --- azuracast ---
-    azuracast_base_url: str = field(default_factory=lambda: _env("AZURACAST_BASE_URL", ""))
-    azuracast_station_id: str = field(default_factory=lambda: _env("AZURACAST_STATION_ID", ""))
-    azuracast_api_key: str = field(default_factory=lambda: _env("AZURACAST_API_KEY", ""))
-    azuracast_dj_url: str = field(default_factory=lambda: _env("AZURACAST_DJ_URL", ""))
-    azuracast_dj_password: str = field(default_factory=lambda: _env("AZURACAST_DJ_PASSWORD", ""))
+    # Only the codec stays here: changing it means restarting the ffmpeg source
+    # anyway. Everything else about the integration -- including whether it runs
+    # at all -- is a runtime setting, see settings.py.
     azuracast_dj_codec: str = field(default_factory=lambda: _env("AZURACAST_DJ_CODEC", "mp3"))
 
     @property

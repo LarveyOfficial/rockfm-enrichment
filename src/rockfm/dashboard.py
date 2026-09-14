@@ -94,6 +94,14 @@ tr.sel td{background:#1f2733}
 .look input:focus{outline:1px solid var(--cancion);border-color:var(--cancion)}
 .look .thumb{width:40px;height:40px;border-radius:5px;object-fit:cover;background:#0e0e12}
 .saved{color:var(--ok);font-size:.76rem;margin-left:10px}
+.cfg{display:grid;grid-template-columns:190px 1fr;gap:8px 12px;align-items:center;max-width:720px}
+.cfg label{color:var(--dim);font-size:.78rem}
+.cfg input[type=text]{background:#0e0e12;border:1px solid var(--line);border-radius:6px;
+  color:var(--fg);padding:6px 9px;font:inherit;font-size:.78rem;width:100%}
+.cfg input[type=text]:focus{outline:1px solid var(--cancion);border-color:var(--cancion)}
+.cfg .toggle{display:flex;align-items:center;gap:8px;font-size:.8rem}
+.cfg .group{grid-column:1/-1;color:var(--dim);font-size:.66rem;text-transform:uppercase;
+  letter-spacing:.08em;margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
 </style></head><body>
 <div class="wrap">
   <header>
@@ -122,6 +130,16 @@ tr.sel td{background:#1f2733}
   <div class="panel">
     <h2>Selected</h2>
     <div id="detail"><div class="empty">Click anything on the timeline to inspect and play it.</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Settings</h2>
+    <p class="muted" style="margin:-4px 0 12px;font-size:.76rem">
+      Saved straight to the database and picked up within a few seconds &mdash; no
+      restart, so changing something never costs a hole in the recording.
+      Secrets are never sent back to this page; leave one blank to keep it.
+    </p>
+    <div id="settings"><div class="empty">loading&hellip;</div></div>
   </div>
 
   <div class="panel">
@@ -215,8 +233,12 @@ function renderChips() {
     chip('gaps', status.gaps.length, status.gaps.length ? 'warn' : ''),
   ];
   if (b.state !== 'ready') {
-    out.unshift(chip('playout', b.state === 'filling'
-      ? `filling · ready in ${hhmm(b.seconds_until_ready)}` : b.state, 'warn'));
+    const text = b.state === 'filling'
+      ? `filling · ready in ${hhmm(b.seconds_until_ready)}`
+      : b.state === 'gap'
+        ? `recording gap · resumes in ${hhmm(b.seconds_until_ready)}`
+        : b.state;
+    out.unshift(chip('playout', text, b.state === 'gap' ? 'bad' : 'warn'));
   }
   el('chips').innerHTML = out.join('');
 }
@@ -387,6 +409,72 @@ audio.addEventListener('timeupdate', () => {
 });
 audio.addEventListener('ended', stopAudio);
 
+// --- settings -----------------------------------------------------------
+
+const SETTING_LABELS = {
+  public_url: 'Public URL',
+  display_language: 'Display language',
+  min_nonmusic_seconds: 'Min non-music seconds',
+  azuracast_enabled: 'Enable AzuraCast',
+  azuracast_base_url: 'AzuraCast base URL',
+  azuracast_station_id: 'Station ID',
+  azuracast_api_key: 'API key',
+  azuracast_dj_url: 'DJ URL',
+  azuracast_dj_password: 'DJ password',
+};
+const AZURACAST_FIELDS = ['azuracast_enabled', 'azuracast_base_url', 'azuracast_station_id',
+                          'azuracast_api_key', 'azuracast_dj_url', 'azuracast_dj_password'];
+
+async function loadSettings() {
+  const data = await (await fetch('/api/settings', {cache:'no-store'})).json();
+  const row = name => {
+    const spec = data.fields[name], value = data.current[name];
+    const label = `<label for="set-${name}">${SETTING_LABELS[name] || name}</label>`;
+    if (spec.type === 'bool') {
+      return label + `<span class="toggle"><input type="checkbox" id="set-${name}"
+        data-name="${name}" ${value ? 'checked' : ''}></span>`;
+    }
+    const placeholder = spec.type === 'secret' ? 'unchanged' : String(spec.default ?? '');
+    return label + `<input type="text" id="set-${name}" data-name="${name}"
+      value="${escape(spec.type === 'secret' ? '' : value)}"
+      placeholder="${escape(placeholder)}">`;
+  };
+  const general = Object.keys(data.fields).filter(n => !AZURACAST_FIELDS.includes(n));
+  el('settings').innerHTML = `
+    <div class="cfg">
+      ${general.map(row).join('')}
+      <div class="group">AzuraCast</div>
+      ${AZURACAST_FIELDS.map(row).join('')}
+    </div>
+    <div class="actions">
+      <button id="save-settings">save</button>
+      <span id="settings-note" class="saved"></span>
+    </div>`;
+  el('save-settings').onclick = saveSettings;
+}
+
+async function saveSettings() {
+  const payload = {};
+  document.querySelectorAll('#settings [data-name]').forEach(input => {
+    payload[input.dataset.name] = input.type === 'checkbox' ? input.checked : input.value;
+  });
+  const btn = el('save-settings');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(res.status);
+    el('settings-note').textContent = 'saved';
+    setTimeout(() => { el('settings-note').textContent = ''; }, 2500);
+    loadSettings();
+  } catch (err) {
+    el('settings-note').textContent = 'could not save';
+  }
+  btn.disabled = false;
+}
+
 // --- appearance ---------------------------------------------------------
 
 let look = null;
@@ -463,6 +551,7 @@ el('auto').onclick = () => {
 el('stop').onclick = stopAudio;
 
 load();
+loadSettings();
 loadAppearance();
 setInterval(() => { if (auto) load(); }, 5000);
 </script></body></html>

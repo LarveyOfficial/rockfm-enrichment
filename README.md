@@ -139,26 +139,41 @@ the delay, not a fault: the dashboard shows a countdown and the health check
 stays green throughout. Recognition starts working within minutes, so the
 dashboard is useful long before the audio is.
 
-### Key settings
+### Settings
+
+Only what cannot change while running is an environment variable:
 
 | Variable | Default | Notes |
 |---|---|---|
 | `LOCAL_TZ` | `America/New_York` | Delay is derived from this vs `Europe/Madrid` |
 | `BUFFER_HOURS` | `24` | Must exceed the delay. ~29 MB per hour |
+| `SEED_ON_START` | `true` | Build the fingerprint index from the catalog on first run |
 | `RECOGNIZER` | `shazamio` | or `audd`, `acrcloud` |
 | `SEGMENTER` | `ina` | or `light` for a constrained host |
-| `DISPLAY_LANGUAGE` | `es` | or `en` |
-| `MIN_NONMUSIC_SECONDS` | `5` | Below this, a non-song stretch gets no verdict |
-| `PUBLIC_URL` | — | Makes artwork URLs absolute for AzuraCast |
+| `AZURACAST_DJ_CODEC` | `mp3` | or `copy` to pass the original AAC through |
+
+Everything else lives in the dashboard's **Settings** panel and is stored in the
+database: the whole AzuraCast integration, the public URL, display language and
+the non-music threshold. Restarting to change a setting would tear a hole in the
+recording and discard whatever the analyzer was part way through, so nothing
+worth changing needs one.
+
+Secrets are never sent back to the browser. Leave a password field blank to keep
+the stored value.
 
 `DELAY_SECONDS` forces a fixed delay, which is useful for testing — set it to
 something small and the stream becomes near-live.
 
 ### AzuraCast
 
-Set `AZURACAST_BASE_URL`, `AZURACAST_STATION_ID` and `AZURACAST_API_KEY` (the key
-needs the station's *Broadcasting* permission), plus `AZURACAST_DJ_URL` and
-`AZURACAST_DJ_PASSWORD` to push the audio as a live source.
+Fill in the base URL, station ID and API key (the key needs the station's
+*Broadcasting* permission) in the dashboard's Settings panel, plus the DJ URL and
+password to push audio as a live source, then tick **Enable AzuraCast**. Both the
+metadata push and the audio source follow the toggle within a few seconds.
+
+Turning it off hands the station back its own identity -- title "RockFM", no
+artist, the RockFM logo -- rather than leaving AzuraCast frozen on whatever song
+was playing when it stopped being updated.
 
 The station must use the **Liquidsoap backend**. Metadata updates go through
 `/api/station/{id}/nowplaying/update`, which resolves to Liquidsoap's
@@ -200,6 +215,18 @@ not.
 does the heavy lifting and this is only consulted for genuinely new audio. AudD
 and ACRCloud adapters are included for anyone who would rather pay for a
 supported API.
+
+## Restarts and gaps
+
+Recording resumes on start and the analyzer picks up from where its cursor left
+off, so a restart costs only the audio that was not recorded while it was down.
+
+That missing stretch is a real hole. Six hours later playout reaches it and
+serves nothing, returning 503 with a reason rather than audio; the dashboard
+shows `recording gap` with a countdown to when recording resumed, and the health
+check stays green because ingest is fine and nothing can refill history. Playing
+the last few seconds from before the outage on a loop would be worse than
+silence, which is what an earlier version did.
 
 ## Known limitations
 

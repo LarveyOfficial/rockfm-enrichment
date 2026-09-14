@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import appearance, db, hlsutil, labels
+from . import appearance, db, hlsutil, labels, settings
 from . import strings_es as S
 from .config import Config
 from .dashboard import DASHBOARD_HTML
@@ -55,16 +55,34 @@ class Playout:
         return item is None or item["kind"] != S.KIND_CANCION
 
     def window(self) -> list[sqlite3.Row]:
-        return db.segments_upto(
-            self.conn, self.position_ms(), self.config.playlist_segments
-        )
+        """Segments to serve right now, or nothing if the buffer has a hole here.
+
+        Asking for the newest segments at or before the playout position would,
+        during a hole, hand back whatever was recorded before it -- re-stamped
+        to look current, and re-served until the hole ends. A restart would
+        therefore replay its last few seconds on a loop rather than admit the
+        audio is missing. Silence is the honest answer.
+        """
+        position = self.position_ms()
+        rows = db.segments_upto(self.conn, position, self.config.playlist_segments)
+        if rows:
+            newest = rows[-1]
+            behind = position - (newest["pdt_ms"] + newest["duration_ms"])
+            if behind > GAP_TOLERANCE_MS:
+                return []
+        return rows
 
     # --- playlists ---
 
     def media_playlist(self) -> str:
         rows = self.window()
         if not rows:
-            raise HTTPException(status_code=503, detail="buffer is still filling")
+            state, _remaining = self.buffer_state()
+            detail = {
+                "gap": "nothing was recorded for this moment",
+                "filling": "buffer is still filling",
+            }.get(state, "no audio available")
+            raise HTTPException(status_code=503, detail=detail)
 
         shift = timedelta(seconds=self.delay.current)
         out: list[hlsutil.OutSegment] = []
@@ -103,7 +121,7 @@ class Playout:
 
         item = db.timeline_at(self.conn, pdt_ms)
         label = labels.stream_title(
-            dict(item) if item else {}, self.config.display_language, self.appearance
+            dict(item) if item else {}, self.language, self.appearance
         )
         try:
             return hlsutil.rewrite_tit2(data, label)
@@ -114,13 +132,21 @@ class Playout:
     # --- now playing ---
 
     @property
+    def settings(self) -> dict:
+        return settings.load(self.conn)
+
+    @property
+    def language(self) -> str:
+        return self.settings["display_language"]
+
+    @property
     def appearance(self) -> dict[str, dict[str, str]]:
-        return appearance.load(self.conn, self.config.display_language)
+        return appearance.load(self.conn, self.language)
 
     def _present(self, item: sqlite3.Row | None) -> tuple[str, str, str | None]:
         if item is None:
             return S.STATION_NAME, "", None
-        return labels.present(dict(item), self.config.display_language, self.appearance)
+        return labels.present(dict(item), self.language, self.appearance)
 
     def _render(self, item: sqlite3.Row | None) -> tuple[str, str]:
         primary, secondary, _ = self._present(item)
@@ -169,7 +195,7 @@ class Playout:
         latest = db.latest_segment(self.conn)
         state, remaining = self.buffer_state()
         return {
-            "station": {"name": S.STATION_NAME, "language": self.config.display_language},
+            "station": {"name": S.STATION_NAME, "language": self.language},
             "delay_seconds": self.delay.current,
             "delay_hours": round(self.delay.current / 3600, 2),
             "pending_delay_seconds": self.delay.pending.delay if self.delay.pending else None,
@@ -200,8 +226,14 @@ class Playout:
         fault, so it gets its own state rather than looking like a failure.
         """
         position = self.position_ms()
-        if db.segment_at(self.conn, position) is not None:
-            return "ready", 0.0
+        covering = db.segment_at(self.conn, position)
+        if covering is not None:
+            behind = position - (covering["pdt_ms"] + covering["duration_ms"])
+            if behind <= GAP_TOLERANCE_MS:
+                return "ready", 0.0
+            # Recorded either side but not here: a restart, or an outage.
+            following = db.segments_from(self.conn, position, 1)
+            return "gap", (following[0]["pdt_ms"] - position) / 1000 if following else None
         earliest = db.earliest_segment(self.conn)
         if earliest is None:
             return "empty", None
@@ -215,10 +247,9 @@ class Playout:
         """Everything the analyzer and classifier worked out over a span."""
         items = []
         look = self.appearance
+        language = self.language
         for row in db.timeline_between(self.conn, start_ms, end_ms):
-            primary, secondary, art = labels.present(
-                dict(row), self.config.display_language, look
-            )
+            primary, secondary, art = labels.present(dict(row), language, look)
             items.append(
                 {
                     "start": row["start_ms"],
@@ -342,7 +373,7 @@ class Playout:
         # every orchestrator calling a perfectly healthy container sick.
         ingesting = lag is not None and lag < 120
         return {
-            "ok": ingesting and state in {"ready", "filling", "empty"},
+            "ok": ingesting and state in {"ready", "filling", "empty", "gap"},
             "state": state,
             "ingest_lag_seconds": lag,
             "playout_ready": state == "ready",
@@ -456,7 +487,7 @@ def create_app(config: Config | None = None) -> FastAPI:
             {
                 "configurable": list(appearance.CONFIGURABLE),
                 "fields": list(appearance.FIELDS),
-                "defaults": appearance.defaults(config.display_language),
+                "defaults": appearance.defaults(state.language),
                 "current": state.appearance,
             },
             headers={"Access-Control-Allow-Origin": "*"},
@@ -470,8 +501,35 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="expected a JSON object") from None
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="expected a JSON object")
-        saved = appearance.save(state.conn, payload, config.display_language)
+        saved = appearance.save(state.conn, payload, state.language)
         return JSONResponse({"current": saved}, headers={"Access-Control-Allow-Origin": "*"})
+
+    @app.get("/api/settings")
+    def get_settings() -> JSONResponse:
+        return JSONResponse(
+            {
+                "fields": {
+                    name: {"type": kind, "default": default}
+                    for name, (default, _env, kind) in settings.FIELDS.items()
+                },
+                "current": settings.public(state.settings),
+            },
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.put("/api/settings")
+    async def put_settings(request: Request) -> JSONResponse:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="expected a JSON object") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="expected a JSON object")
+        saved = settings.save(state.conn, payload)
+        return JSONResponse(
+            {"current": settings.public(saved)},
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
 
     @app.get("/api/status")
     def status() -> JSONResponse:

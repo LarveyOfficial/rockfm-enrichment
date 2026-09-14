@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS fp_tracks (
     -- is what makes a match offset mean "elapsed within the song".
     song_anchored INTEGER NOT NULL DEFAULT 0,
     learned_ms  INTEGER,            -- length of the span actually learned
+    last_seen_ms INTEGER,           -- when this was last heard on air
     created_ms  INTEGER NOT NULL,
     updated_ms  INTEGER NOT NULL
 );
@@ -117,6 +118,7 @@ CREATE TABLE IF NOT EXISTS meta (
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("fp_tracks", "song_anchored", "INTEGER NOT NULL DEFAULT 0"),
     ("fp_tracks", "learned_ms", "INTEGER"),
+    ("fp_tracks", "last_seen_ms", "INTEGER"),
 )
 
 

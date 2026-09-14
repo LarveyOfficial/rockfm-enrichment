@@ -27,6 +27,9 @@ KIND = "nonmusic"
 # than for songs; a false cluster would label live talk as an advert.
 MIN_VOTES = 24
 MIN_SCORE = 0.08
+# Two sightings closer together than this are the same airing seen twice, not a
+# repeat -- which is what re-analysing already-scanned audio produces.
+SAME_AIRING_MS = 120_000
 
 
 @dataclass(frozen=True)
@@ -59,13 +62,15 @@ class RepetitionIndex:
 
         match = self.index.match(hashes, kind=KIND, min_votes=MIN_VOTES)
         if match is not None and match.score >= MIN_SCORE:
-            self.index.bump(match.track_id)
-            occurrences = self.index.occurrences(match.track_id)
-            log.debug("repeat of %s (play %d)", match.key, occurrences)
+            occurrences = self.index.record_sighting(match.track_id, at_ms, SAME_AIRING_MS)
+            log.debug("heard %s again (airing %d)", match.key, occurrences)
             return Cluster(match.track_id, match.key, occurrences)
 
         key = self._next_key()
         track_id = self.index.add(
             kind=KIND, key=key, hashes=hashes, source="repetition", anchor_ms=at_ms
+        )
+        self.conn.execute(
+            "UPDATE fp_tracks SET last_seen_ms = ? WHERE id = ?", (at_ms, track_id)
         )
         return Cluster(track_id, key, 1)

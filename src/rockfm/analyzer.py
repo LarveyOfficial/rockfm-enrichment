@@ -237,6 +237,12 @@ class Analyzer:
         # probe extent -- so planning must not overwrite it with the worse one.
         self._settled: set[str] = set()
         self._grounded: set[str] = set()
+        # Extension results, keyed by the raw extent that produced them. See
+        # `_extend`: planning repeats after every probe and the answer only
+        # changes when the raw extent does.
+        self._extents: dict[
+            tuple[str | None, int, int], tuple[int, int, str, str]
+        ] = {}
         # Set when a window ends with audio nobody could identify because the
         # recogniser was down. The cursor stops there rather than past it.
         self._held = False
@@ -718,6 +724,27 @@ class Analyzer:
         shift = int(round((start_ms - anchor_ms) / 1000 * fingerprint.FRAMES_PER_SECOND))
         self.index.extend(run.label.track_id, fingerprint.compute(span), shift)
 
+    def _extend(self, window: Window, run: Run) -> None:
+        """Extend a run, or recall what extending it produced last time.
+
+        Planning happens after almost every probe, and it re-plans every run in
+        the window, not just the one the scan is near. Extension is eight local
+        matches an edge, so a window of ten runs was paying thousands of them --
+        and the answer cannot change unless the run's raw extent has. Measured
+        on air with a fully learned index this was eighty seconds a probe, for
+        audio twenty-four seconds long: a third of real time, losing ground
+        against the stream that feeds it.
+        """
+        raw = (run.key, run.first_ms, run.last_ms)
+        remembered = self._extents.get(raw)
+        if remembered is not None:
+            run.first_ms, run.last_ms, run.start_stopped, run.end_stopped = remembered
+            return
+        self._extend_run(window, run)
+        self._extents[raw] = (
+            run.first_ms, run.last_ms, run.start_stopped, run.end_stopped,
+        )
+
     def _extend_run(self, window: Window, run: Run) -> None:
         """Find where a run really reaches, not where the 24s grid landed.
 
@@ -851,7 +878,7 @@ class Analyzer:
         # pinned every song to a multiple of the scan step.
         for run in runs:
             self._ground_reference(window, run)
-            self._extend_run(window, run)
+            self._extend(window, run)
 
         for position, run in enumerate(runs):
             if run.key is None:
@@ -930,6 +957,7 @@ class Analyzer:
         self._learned.clear()
         self._settled.clear()
         self._grounded.clear()
+        self._extents.clear()
         self._held = False
         total = self._probe_count(window)
         emitted_to = window.start_ms

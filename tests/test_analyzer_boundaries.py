@@ -624,3 +624,49 @@ def test_nothing_imports_a_speech_segmenter() -> None:
 
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("rockfm.classify.segmenter")
+
+
+def test_planning_twice_does_not_extend_twice(tmp_path):
+    """Planning repeats after almost every probe; extension must not.
+
+    Each edge is eight local matches, and with a fully learned index those are
+    not cheap. Re-running them for every run on every probe cost eighty seconds
+    per probe against twenty-four seconds of audio -- a third of real time,
+    losing ground against the stream feeding it. The answer cannot change
+    unless the run's raw extent has.
+    """
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    analyzer._ground_reference = lambda _w, _r: None
+    analyzer._same_track = lambda _w, at, key, s=0.0: at <= 306_000
+    analyzer._external = lambda _w, at: None
+
+    calls: list[int] = []
+    real = analyzer._extend_run
+    analyzer._extend_run = lambda w, r: (calls.append(r.first_ms), real(w, r))[1]
+
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    window = Window(0, MIN_WINDOW_MS, samples)
+
+    def fresh():
+        run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
+        run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
+                          confidence=1.0, track_id=1)
+        return run
+
+    first = fresh()
+    analyzer._extend(window, first)
+    assert len(calls) == 1
+
+    # The same raw extent, planned again: recalled, not recomputed.
+    again = fresh()
+    analyzer._extend(window, again)
+    assert len(calls) == 1, "extension repeated for an extent already walked"
+    assert (again.first_ms, again.last_ms) == (first.first_ms, first.last_ms)
+
+    # A run that actually grew is a different question, and gets asked.
+    grown = fresh()
+    grown.last_ms = 324_000
+    analyzer._extend(window, grown)
+    assert len(calls) == 2

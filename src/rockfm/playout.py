@@ -244,7 +244,7 @@ class Playout:
     # --- dashboard support ---
 
     def timeline(self, start_ms: int, end_ms: int) -> list[dict]:
-        """Everything the analyzer and classifier worked out over a span."""
+        """Everything the analyzer worked out over a span."""
         items = []
         look = self.appearance
         language = self.language
@@ -288,9 +288,6 @@ class Playout:
             ).fetchone()[0],
             "learned_songs": self.conn.execute(
                 "SELECT COUNT(*) FROM fp_tracks WHERE kind = 'music'"
-            ).fetchone()[0],
-            "repeat_clusters": self.conn.execute(
-                "SELECT COUNT(*) FROM fp_tracks WHERE kind = 'nonmusic'"
             ).fetchone()[0],
         }
 

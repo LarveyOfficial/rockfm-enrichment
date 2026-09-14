@@ -51,11 +51,6 @@ def present(
             show or S.STATION_NAME,
             presenters or S.text("programa.secondary_fallback", language),
         )
-    elif kind == S.KIND_PUBLICIDAD:
-        fallback = (
-            S.text("publicidad.primary", language),
-            S.text("publicidad.secondary", language),
-        )
     else:
         fallback = (S.text("desconocido.primary", language) or S.STATION_NAME, show)
 

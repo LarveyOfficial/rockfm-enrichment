@@ -5,7 +5,8 @@ SONG = {
     "album": "Plastic Letters", "year": 1977, "art_url": "/art/abc.jpg",
     "show_title": None, "show_lead": None,
 }
-ADVERT = {"kind": "publicidad", "art_url": None, "show_title": None, "show_lead": None}
+# A stretch between songs that the schedule had nothing to say about.
+UNNAMED = {"kind": "programa", "art_url": None, "show_title": None, "show_lead": None}
 SHOW = {
     "kind": "programa", "art_url": "/art/show.jpg",
     "show_title": "El Pirata y su banda",
@@ -20,10 +21,10 @@ def test_song_maps_to_real_fields():
     assert meta.album == "Plastic Letters"
 
 
-def test_advert_borrows_the_fields_for_its_spanish_label():
-    meta = metadata_for(ADVERT, "es")
-    assert meta.title == "Publicidad"
-    assert meta.artist == "Volvemos enseguida"
+def test_an_unnamed_stretch_falls_back_to_the_station():
+    """No schedule entry, so the honest label is the station itself."""
+    meta = metadata_for(UNNAMED, "es")
+    assert meta.title == "RockFM"
 
 
 def test_programme_shows_presenters_as_the_artist():
@@ -43,11 +44,7 @@ def test_relative_art_is_left_alone_without_a_public_url():
 
 
 def test_params_omit_empty_fields():
-    params = metadata_for(ADVERT, "es").as_params()
+    params = metadata_for(UNNAMED, "es").as_params()
     assert "album" not in params
     assert "art" not in params
-    assert params["title"] == "Publicidad"
-
-
-def test_english_labels_when_configured():
-    assert metadata_for(ADVERT, "en").title == "Advertisements"
+    assert params["title"] == "RockFM"

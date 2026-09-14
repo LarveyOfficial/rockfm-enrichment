@@ -31,7 +31,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, replace
-from datetime import UTC
+from datetime import UTC, datetime
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -47,6 +47,7 @@ from .fingerprint import FingerprintIndex
 from .recognize import Recognition
 from .recognize import build as build_recognizer
 from .rockfm_api import RockFmApi, catalog_key
+from .schedule import Schedule
 from .timeshift import target_delay_seconds
 
 log = logging.getLogger("rockfm.analyzer")
@@ -84,7 +85,11 @@ RELEARN_GROWTH_MS = 90_000
 EXTEND_STEP_MS = 6_000
 EXTEND_LIMIT_MS = 24_000
 BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
-MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
+MIN_SONG_MS = 45_000       # floor for songs of unknown length
+# A song has to run for a decent share of itself to count as having been played.
+# Stations trail tracks over links and play stings built from them, and those
+# match as confidently as the real airing -- length is what separates them.
+MIN_SONG_FRACTION = 0.15
 # Windows must comfortably hold several songs. At five minutes a single track
 # fills one, so its boundaries land on the window edges instead of being found
 # in the audio -- which is how every song came out the same length.
@@ -119,6 +124,9 @@ class Item:
     art_url: str | None = None
     confidence: float = 0.0
     source: str = "unknown"
+    show_title: str | None = None
+    show_lead: str | None = None
+    show_image: str | None = None
 
     @property
     def duration_ms(self) -> int:
@@ -199,6 +207,10 @@ class Analyzer:
                 log.warning("catalog unavailable (%s); artwork falls back to iTunes/Deezer", exc)
                 catalog = []
             self.enricher = Enricher(config.art_dir, catalog)
+        # Names the stretches between songs. The station publishes its own
+        # weekly grid, so a gap does not have to be guessed at -- it can be
+        # looked up.
+        self.schedule = Schedule()
         self.external_calls = 0
         # Extents already taught to the index this window, so that planning --
         # which now runs after nearly every probe -- does not re-fingerprint
@@ -296,6 +308,32 @@ class Analyzer:
             log.info("external lookups now paced at %.0fs apart", wanted)
             self.recognizer.min_interval = wanted
 
+    def _programme(self, at_ms: int):
+        """Whatever the station says is on air then, or None."""
+        try:
+            moment = datetime.fromtimestamp(at_ms / 1000, tz=UTC).astimezone(
+                self.config.source_tz
+            )
+            return self.schedule.at(moment)
+        except Exception as exc:  # the grid is a nicety, never a blocker
+            log.debug("schedule unavailable: %s", exc)
+            return None
+
+    def _plays_long_enough(self, key: str | None, duration_ms: int) -> bool:
+        """Did this song actually play, or was it only touched on?
+
+        A sting, a bed under a link, or a track trailed before the break all
+        match as confidently as the real airing -- the fingerprint cannot tell
+        them apart, because they are the same recording. What separates them is
+        how much of the song ran.
+        """
+        if key is None:
+            return False
+        expected = self._expected_ms(key)
+        if expected:
+            return duration_ms >= expected * MIN_SONG_FRACTION
+        return duration_ms >= MIN_SONG_MS
+
     def _expected_ms(self, key: str) -> int | None:
         """How long this song is supposed to run, per iTunes/Deezer."""
         row = db.get_song_meta(self.conn, key)
@@ -364,9 +402,9 @@ class Analyzer:
                 "album": item.album,
                 "year": item.year,
                 "art_url": item.art_url,
-                "show_title": None,
-                "show_lead": None,
-                "show_image": None,
+                "show_title": item.show_title,
+                "show_lead": item.show_lead,
+                "show_image": item.show_image,
                 "confidence": item.confidence,
                 "source": item.source,
                 "cluster_id": None,
@@ -777,8 +815,12 @@ class Analyzer:
 
         keep = runs[:-1] if len(runs) > 1 else runs
         segments = [(run, edges[i], edges[i + 1]) for i, run in enumerate(keep)]
-        seam_ms = int(settings.load(self.conn)["max_seam_seconds"] * 1000)
-        return self._absorb_slivers(segments, seam_ms)
+        live = settings.load(self.conn)
+        return self._absorb_slivers(
+            segments,
+            int(live["max_seam_seconds"] * 1000),
+            int(live["min_nonmusic_seconds"] * 1000),
+        )
 
     def process_window(self, window: Window) -> int:
         """Scan the window, publishing each item as soon as it is settled.
@@ -836,23 +878,23 @@ class Analyzer:
             emitted_to = end_ms
         return emitted_to
 
-    @staticmethod
     def _absorb_slivers(
-        segments: list[tuple[Run, int, int]], seam_ms: int
+        self, segments: list[tuple[Run, int, int]], seam_ms: int, nonmusic_ms: int
     ) -> list[tuple[Run, int, int]]:
-        """Fold away fragments, judged on how long they actually are.
+        """Fold away anything too small to stand on its own.
 
-        Two different things end up too small to publish. A *named* fragment is
-        an artefact: a window is rewound to the boundary before its last run, so
-        the next window opens on a second or two of the song just committed.
-        An *unnamed* fragment shorter than the crossfade seam is the transition
-        between two tracks.
+        What survives is decided by duration alone. A song has to have run for a
+        real share of itself; a stretch between songs has to last longer than a
+        presenter draws breath. Everything else is the join between two tracks,
+        and belongs to them rather than to itself.
 
-        Anything longer is real content -- a presenter link, a jingle, an advert
-        -- and must survive to reach the classifier. Judging that by how many
-        probes a stretch spanned rather than how long it lasted is what made an
-        eighteen second link between two songs disappear: it fell inside a
-        single probe, so it measured as zero.
+        Short gaps are closed by splitting them down the middle so the songs
+        abut. Longer ones -- still too short to name -- are given to the song
+        that follows, which is where a fade more often belongs.
+
+        Judging this by how many probes a stretch spanned rather than how long
+        it lasted is what once made an eighteen second link vanish: it fell
+        inside a single probe, so it measured as zero.
         """
         cleaned: list[tuple[Run, int, int]] = []
         carried_start: int | None = None
@@ -861,11 +903,14 @@ class Analyzer:
                 start_ms, carried_start = carried_start, None
 
             duration = end_ms - start_ms
-            fragment = duration < (MIN_SONG_MS if run.key is not None else seam_ms)
+            if run.key is not None:
+                fragment = not self._plays_long_enough(run.key, duration)
+            else:
+                fragment = duration < nonmusic_ms
+
             if fragment:
                 has_next = index + 1 < len(segments)
-                if has_next and cleaned:
-                    # Between two neighbours: split it and let them meet.
+                if has_next and cleaned and duration <= seam_ms:
                     middle = start_ms + duration // 2
                     previous_run, previous_start, _ = cleaned[-1]
                     cleaned[-1] = (previous_run, previous_start, middle)
@@ -902,18 +947,42 @@ class Analyzer:
         log.debug("closed a %.1fs seam before %s", seam / 1000, _clock(start_ms))
         return middle
 
+    def _between_songs(self, start_ms: int, end_ms: int) -> Item:
+        """Name a stretch that is not a song.
+
+        It is whatever programme the station says was on air. That is the whole
+        judgement: no attempt to tell an advert from a presenter link, because
+        the two cannot be told apart reliably and naming the show is true
+        either way. A listener seeing the right programme during an advert is a
+        far smaller error than seeing "Publicidad" over the presenter talking.
+        """
+        programme = self._programme(start_ms)
+        if programme is None:
+            return Item(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                kind=S.KIND_DESCONOCIDO,
+                source="gap",
+            )
+        return Item(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            kind=S.KIND_PROGRAMA,
+            art_url=programme.image_url,
+            show_title=programme.title,
+            show_lead=programme.lead,
+            show_image=programme.image_url,
+            confidence=0.5,
+            source="schedule",
+        )
+
     def _commit_run(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         if end_ms <= start_ms:
             return
         start_ms = self._close_seam(start_ms)
-        if run.key is None or end_ms - start_ms < MIN_SONG_MS:
+        if not self._plays_long_enough(run.key, end_ms - start_ms):
             self._commit(
-                Item(
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    kind=S.KIND_DESCONOCIDO,
-                    source="unresolved",
-                )
+                self._between_songs(start_ms, end_ms)
             )
             return
 

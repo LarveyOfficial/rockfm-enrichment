@@ -23,16 +23,18 @@ from . import strings_es as S
 META_KEY: Final = "appearance"
 FIELDS: Final = ("title", "artist", "art")
 
-# Gaps are never shown to anyone, songs describe themselves, and the rest take
-# their name and artwork from the station's schedule. Only adverts are left.
-CONFIGURABLE: Final = (S.KIND_PUBLICIDAD,)
+# Songs describe themselves and the stretches between them are named from the
+# station's schedule. What is left is audio that matched nothing and happened
+# while the schedule had nothing to say -- the one case with no sensible name
+# of its own, and so the one worth being able to set.
+CONFIGURABLE: Final = (S.KIND_DESCONOCIDO,)
 
 
 def defaults(language: str = "es") -> dict[str, dict[str, str]]:
     return {
-        S.KIND_PUBLICIDAD: {
-            "title": S.text("publicidad.primary", language),
-            "artist": S.text("publicidad.secondary", language),
+        S.KIND_DESCONOCIDO: {
+            "title": S.text("desconocido.primary", language),
+            "artist": "",
             "art": "",
         },
     }

@@ -10,10 +10,6 @@ def test_song_missing_an_artist_still_shows_the_title():
     assert labels.stream_title({"kind": "cancion", "title": "Denis"}) == "Denis"
 
 
-def test_advert_uses_its_spanish_label():
-    assert labels.stream_title({"kind": "publicidad"}) == "Publicidad - Volvemos enseguida"
-
-
 def test_programme_shows_the_show_and_presenters():
     row = {"kind": "programa", "show_title": "RockFM Motel", "show_lead": "Rodrigo Contreras"}
     assert labels.stream_title(row) == "RockFM Motel - Rodrigo Contreras"

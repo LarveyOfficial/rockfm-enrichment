@@ -5,10 +5,8 @@ hash (freq1, freq2, dt). Matching histograms the time offset between query and
 reference hashes -- a real match produces a sharp spike at one offset, whereas
 coincidental hash collisions scatter.
 
-Used for two jobs:
-  * `music`     -- identify songs (seeded from previews, then learned from air)
-  * `nonmusic`  -- cluster repeating ads, jingles and sweepers, which is how we
-                   tell an advert apart from live DJ talk
+Used to identify songs: seeded from the station's own catalog previews, then
+relearned from the broadcast, which is the version we will hear next time.
 """
 
 from __future__ import annotations
@@ -244,31 +242,6 @@ class FingerprintIndex:
 
     def get(self, track_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM fp_tracks WHERE id = ?", (track_id,)).fetchone()
-
-    def record_sighting(self, track_id: int, at_ms: int, apart_ms: int) -> int:
-        """Count an airing, but only if it is a new one.
-
-        Re-analysing already-scanned audio finds the same cluster at the same
-        moment it was first heard. Counting that as a second airing is how
-        presenter talk gets promoted to an advert simply by looking at it twice.
-        A sighting within `apart_ms` of the last one is the same airing.
-        """
-        row = self.conn.execute(
-            "SELECT occurrences, last_seen_ms, anchor_ms FROM fp_tracks WHERE id = ?",
-            (track_id,),
-        ).fetchone()
-        if row is None:
-            return 0
-        last_seen = row["last_seen_ms"] if row["last_seen_ms"] is not None else row["anchor_ms"]
-        if last_seen is not None and abs(at_ms - last_seen) <= apart_ms:
-            return int(row["occurrences"])
-
-        self.conn.execute(
-            "UPDATE fp_tracks SET occurrences = occurrences + 1, last_seen_ms = ?,"
-            " updated_ms = ? WHERE id = ?",
-            (at_ms, int(time.time() * 1000), track_id),
-        )
-        return int(row["occurrences"]) + 1
 
     def bump(self, track_id: int) -> None:
         self.conn.execute(

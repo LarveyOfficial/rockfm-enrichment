@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Final
 
 KIND_CANCION: Final = "cancion"
-KIND_PUBLICIDAD: Final = "publicidad"
 KIND_PROGRAMA: Final = "programa"
 KIND_DESCONOCIDO: Final = "desconocido"
 
@@ -21,14 +20,12 @@ KIND_DESCONOCIDO: Final = "desconocido"
 # detected them -- they were guesses from the clock (top of the hour must be
 # news; a repeat during the overnight block must be an ident) dressed up as
 # findings. Rows written by those versions still render, as desconocido.
-ALL_KINDS: Final = (KIND_CANCION, KIND_PUBLICIDAD, KIND_PROGRAMA, KIND_DESCONOCIDO)
+ALL_KINDS: Final = (KIND_CANCION, KIND_PROGRAMA, KIND_DESCONOCIDO)
 
 STATION_NAME: Final = "RockFM"
 
 ES: Final[dict[str, str]] = {
     "station": STATION_NAME,
-    "publicidad.primary": "Publicidad",
-    "publicidad.secondary": "Volvemos enseguida",
     "desconocido.primary": STATION_NAME,
     "programa.secondary_fallback": "En directo",
     "now_playing": "Sonando ahora",
@@ -39,8 +36,6 @@ ES: Final[dict[str, str]] = {
 
 EN: Final[dict[str, str]] = {
     "station": STATION_NAME,
-    "publicidad.primary": "Advertisements",
-    "publicidad.secondary": "Back shortly",
     "desconocido.primary": STATION_NAME,
     "programa.secondary_fallback": "Live",
     "now_playing": "Now playing",

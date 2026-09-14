@@ -61,11 +61,6 @@
           Description="shazamio (free, no key, unofficial), audd or acrcloud. The local fingerprint index handles repeat plays, so this is only consulted for audio never heard before."
           Type="Variable" Display="advanced" Required="false" Mask="false">shazamio</Config>
 
-  <Config Name="Speech/Music Segmenter" Target="SEGMENTER" Default="ina"
-          Description="ina uses a trained CNN and is accurate but needs about 1 GB of RAM. light is dependency-free and abstains when unsure."
-          Type="Variable" Display="advanced" Required="false" Mask="false">ina</Config>
-
-
 
   <Config Name="Seed On Start" Target="SEED_ON_START" Default="true"
           Description="Build the fingerprint index from RockFM's rotation catalog on first run. Takes about 20 minutes in the background and only happens once."

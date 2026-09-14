@@ -1,6 +1,6 @@
 """Environment configuration: the things that cannot change while running.
 
-Where the data lives, how much to keep, which recogniser and segmenter to load,
+Where the data lives, how much to keep, which recogniser to load,
 and the timezone the delay is computed against. Everything else -- the AzuraCast
 integration, display language, public URL, classification thresholds -- is a
 runtime setting stored in the database and edited from the dashboard, because
@@ -71,7 +71,6 @@ class Config:
 
     # --- recognition / classification ---
     recognizer: str = field(default_factory=lambda: _env("RECOGNIZER", "shazamio"))
-    segmenter: str = field(default_factory=lambda: _env("SEGMENTER", "ina"))
     seed_on_start: bool = field(default_factory=lambda: _bool("SEED_ON_START", True))
 
     # --- azuracast ---

@@ -1,17 +1,18 @@
-"""Speech vs music segmentation.
+"""Is this audio speech, or music?
 
-Two implementations behind one interface:
+Only one implementation now, and deliberately the weaker one. This used to
+decide whether a non-song stretch was an advert or a presenter -- a judgement
+the system no longer makes, since stretches between songs are named from the
+station's own schedule. A trained CNN (inaSpeechSegmenter) did that job and
+brought TensorFlow with it.
 
-  ina    inaSpeechSegmenter (INA, MIT, CNN). Trained, needs no tuning, and
-         usefully treats singing as music and speech-over-music as speech --
-         which is exactly how a DJ talking over a bed should be read. Pulls in
-         TensorFlow, so it is heavy.
-  light  numpy/scipy only. Uses the features speech/music discrimination
-         classically relies on: speech pauses a lot, and its energy envelope
-         is strongly modulated around the 4 Hz syllable rate.
+What is left is a cheaper question: is this probe worth sending to a *music*
+recogniser? Asking costs 0.2 ms; getting it wrong costs one missed
+identification of a song the index learns on its next airing. Answering it with
+a neural network would be spending a great deal to avoid very little.
 
-`SEGMENTER=ina` is the default and falls back to `light` automatically if the
-model cannot be loaded, so a small Unraid box still works.
+Built on Low Short-Time Energy Ratio, and biased against reporting speech, so
+anything ambiguous still goes out to be identified.
 """
 
 from __future__ import annotations
@@ -109,65 +110,13 @@ class LightSegmenter:
         return [Zone(label=label, start_s=0.0, end_s=samples.size / rate)]
 
 
-class InaSegmenter:
-    """inaSpeechSegmenter, a CNN trained for exactly this task."""
+def build(_name: str = "light") -> LightSegmenter:
+    """The only segmenter left.
 
-    name = "ina"
-    _LABELS = {
-        "speech": SPEECH,
-        "male": SPEECH,
-        "female": SPEECH,
-        "music": MUSIC,
-        "noEnergy": SILENCE,
-        "noise": SILENCE,
-    }
-
-    def __init__(self) -> None:
-        from inaSpeechSegmenter import Segmenter
-
-        self._segmenter = Segmenter(vad_engine="smn", detect_gender=False)
-
-    def segments(self, samples: np.ndarray, rate: int) -> list[Zone]:
-        import tempfile
-        from pathlib import Path
-
-        from ..audio import pcm_to_wav
-
-        if samples.size < rate:
-            return []
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "probe.wav"
-            path.write_bytes(pcm_to_wav(samples, rate))
-            raw = self._segmenter(str(path))
-        return [
-            Zone(label=self._LABELS.get(label, SILENCE), start_s=float(start), end_s=float(stop))
-            for label, start, stop in raw
-        ]
-
-    def speech_ratio(self, samples: np.ndarray, rate: int) -> float:
-        zones = self.segments(samples, rate)
-        voiced = sum(z.duration_s for z in zones if z.label in (SPEECH, MUSIC))
-        if voiced <= 0:
-            return 0.0
-        speech = sum(z.duration_s for z in zones if z.label == SPEECH)
-        return speech / voiced
-
-    def classify(self, samples: np.ndarray, rate: int) -> str:
-        zones = self.segments(samples, rate)
-        if not zones:
-            return UNKNOWN
-        voiced = sum(z.duration_s for z in zones if z.label in (SPEECH, MUSIC))
-        if voiced <= 0:
-            return SILENCE
-        return SPEECH if self.speech_ratio(samples, rate) >= 0.5 else MUSIC
-
-
-def build(name: str = "ina"):
-    key = (name or "").strip().lower()
-    if key in {"light", "heuristic"}:
-        return LightSegmenter()
-    try:
-        return InaSegmenter()
-    except Exception as exc:
-        log.warning("inaSpeechSegmenter unavailable (%s); using the light segmenter", exc)
-        return LightSegmenter()
+    A CNN used to decide whether a non-song stretch was an advert or a
+    presenter, which is a judgement the system no longer makes: stretches
+    between songs are named from the station's own schedule. All that remains
+    is deciding whether a probe is worth sending to a music recogniser, and
+    that wants the cheap, abstaining answer rather than the accurate one.
+    """
+    return LightSegmenter()

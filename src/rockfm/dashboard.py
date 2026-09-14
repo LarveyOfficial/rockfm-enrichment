@@ -16,7 +16,7 @@ DASHBOARD_HTML = """<!doctype html>
 :root{
   color-scheme:dark;
   --bg:#0b0b0e; --panel:#141419; --line:#26262e; --fg:#f2f2f5; --dim:#8a8a95;
-  --cancion:#3d7dd8; --publicidad:#d98b2b; --programa:#2f9e8f;
+  --cancion:#3d7dd8; --programa:#2f9e8f;
   --desconocido:#3f3f46;
   --ok:#3fb950; --warn:#d29922; --bad:#f85149;
 }
@@ -165,7 +165,7 @@ tr.sel td{background:#1f2733}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
 <script>
-const KINDS = ['cancion','publicidad','programa','desconocido'];
+const KINDS = ['cancion','programa','desconocido'];
 const colour = k => getComputedStyle(document.documentElement)
   .getPropertyValue('--' + (KINDS.includes(k) ? k : 'desconocido')).trim();
 
@@ -230,7 +230,6 @@ function renderChips() {
     chip('segments', c.segments),
     chip('songs found', c.songs),
     chip('learned', c.learned_songs),
-    chip('repeat clusters', c.repeat_clusters),
     chip('gaps', status.gaps.length, status.gaps.length ? 'warn' : ''),
   ];
   if (b.state !== 'ready') {

@@ -101,7 +101,7 @@ def test_timeline_upsert_replaces_overlapping_rows_atomically(tmp_path):
     conn = db.connect(config.db_path)
 
     db.upsert_timeline(conn, {"start_ms": 0, "end_ms": 10_000, "kind": "cancion"}, 0)
-    db.upsert_timeline(conn, {"start_ms": 10_000, "end_ms": 20_000, "kind": "publicidad"}, 0)
+    db.upsert_timeline(conn, {"start_ms": 10_000, "end_ms": 20_000, "kind": "programa"}, 0)
     assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 2
 
     # A row straddling both replaces both, leaving exactly one.

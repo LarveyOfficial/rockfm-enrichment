@@ -4,8 +4,8 @@ Records Spain's [RockFM](https://www.rockfm.fm/) and replays it on a wall-clock
 delay, so the Madrid morning show lands on your morning. While the audio waits in
 the buffer it is identified by audio fingerprinting and enriched with title,
 artist, album, year, artwork, duration and elapsed time. Everything that is not a
-song — adverts, DJ talk, news, idents — is labelled in Spanish with the real
-programme name and presenters.
+song is labelled in Spanish with the real programme name and presenters, taken
+from the station's own schedule.
 
 It serves a delayed HLS stream and a now-playing API, and can push both the audio
 and the corrected metadata into AzuraCast.
@@ -24,9 +24,7 @@ RockFM HLS ──► ingest ──► 24h buffer on disk (segments stored byte-i
                               ▼   (runs ~6h ahead of airtime)
                           analyzer ──► local fingerprint index
                               │             └── miss ──► external recogniser ──► learn
-                              ▼
-                          classifier ──► repetition · speech/music · schedule
-                              │
+                              │                          (skipped for speech)
                               ▼
                           timeline ──► playout (HLS + now-playing API)
                                    └──► AzuraCast (live source + metadata)
@@ -41,25 +39,37 @@ answer is then learned from the broadcast itself — so a song costs about one
 external call the first time it airs and nothing afterwards. Measured on live
 radio: 16 calls on a cold index, 0 on a warm one over the same audio.
 
-**Four kinds, all of them things we can establish:** a song we identified,
-audio we have heard before (`publicidad`), someone talking (`programa`), and
-none of the above (`desconocido`).
+**Three kinds, all of them things we can establish:** a song we identified
+(`cancion`), the programme that was on air between songs (`programa`), and audio
+that matched nothing while the schedule had nothing to say (`desconocido`).
+
+A song counts as played only if it ran for at least 15% of its own length.
+Stations trail tracks over links and build stings out of them, and those match
+exactly as confidently as the real airing — it is the same recording, so no
+amount of fingerprinting separates them. Duration does.
 
 **Seams between songs.** Radio crossfades, and each edge is located
 independently, so a few seconds can fall between one song ending and the next
 beginning. Anything shorter than **Max crossfade seam seconds** is split down the
 middle so the two songs abut -- otherwise a player keeps showing the previous
-song through the gap, since nothing tells it to change. Longer than that and it
-is a real break, left for the classifier.
+song through the gap, since nothing tells it to change. A gap that reaches **Min
+non-music seconds** is a real break and is named after the programme on air;
+anything between the two thresholds is given to the song that follows.
 
-**Adverts vs DJ talk.** Adverts repeat; a presenter talking never does. Non-song audio is fingerprinted into a second index, so anything heard
-before is an advert or an ident and anything genuinely new is live talk. A
-trained speech/music model keeps an unrecognised *song* from being mistaken for
-talk, and the station's own schedule supplies the programme name and artwork.
-When the signals disagree, the vaguer true label wins: naming the show beats
-guessing "Publicidad". Stretches shorter than `MIN_NONMUSIC_SECONDS` are left
-alone entirely -- station jingles run about two seconds and no verdict fits
-them, so they keep the station name rather than being forced into a category.
+**No advert detection.** An earlier version fingerprinted non-song audio into a
+second index, on the theory that adverts repeat and presenters do not, and ran a
+trained speech/music CNN alongside it. It cost a TensorFlow dependency, a
+background process and a great deal of scan time, and it was wrong often enough
+to matter: re-reading the same audio counted as a second airing and promoted
+presenter talk to `Publicidad`. The two are not reliably separable, and naming
+the programme is true either way — a listener seeing the right show name during
+an advert is a far smaller error than seeing "Publicidad" over the presenter
+talking. So the stretches between songs are simply named from the schedule.
+
+What survives of that work is one cheap use: a numpy speech check, about 0.2 ms
+per probe, that keeps plainly-spoken audio from being sent to a *music*
+recogniser. It is deliberately biased against reporting speech, so anything
+ambiguous still goes out to be identified.
 
 **The delay is not a constant.** Spain and the United States change DST on
 different dates, so Madrid→New York is six hours for most of the year and five
@@ -139,11 +149,6 @@ Copy `unraid-template.xml` to
 right is **Your Timezone**; the defaults cover everything else, and the AzuraCast
 fields can stay blank until you want them.
 
-Only the full image is published. If the server is short on space, build locally
-with `--build-arg INCLUDE_SEGMENTER=false` and set `SEGMENTER=light` -- that
-drops the speech/music model and takes the image from ~2.7 GB to ~0.9 GB, at the
-cost of the classifier abstaining on speech rather than deciding.
-
 **Nothing plays for the first six hours.** That is the buffer filling to match
 the delay, not a fault: the dashboard shows a countdown and the health check
 stays green throughout. Recognition starts working within minutes, so the
@@ -159,7 +164,6 @@ Only what cannot change while running is an environment variable:
 | `BUFFER_HOURS` | `24` | Must exceed the delay. ~29 MB per hour |
 | `SEED_ON_START` | `true` | Build the fingerprint index from the catalog on first run |
 | `RECOGNIZER` | `shazamio` | or `audd`, `acrcloud` |
-| `SEGMENTER` | `ina` | or `light` for a constrained host |
 | `AZURACAST_DJ_CODEC` | `mp3` | or `copy` to pass the original AAC through |
 
 Everything else lives in the dashboard's **Settings** panel and is stored in the
@@ -245,11 +249,10 @@ silence, which is what an earlier version did.
 - Album selection comes from free search APIs and occasionally lands on a
   compilation rather than the original release. Years are reliable; album titles
   are best-effort.
-- Advert detection needs history. Until a cluster has been heard twice it is
-  labelled with the programme name rather than guessed as an advert, so expect
-  the first day to under-report adverts.
-- The classifier has been exercised against music and idents; a validation run
-  across a daytime block with real advert breaks is still outstanding.
-- The speech/music CNN makes the image large. Build with
-  `--build-arg INCLUDE_SEGMENTER=false` and set `SEGMENTER=light` for a much
-  smaller image, at the cost of the classifier abstaining more often.
+- Adverts are not identified as such. A break is named after the programme that
+  was on air, which is true but less specific than naming it an advert. This is
+  deliberate -- see **No advert detection** above.
+- The speech check that keeps talk away from the music recogniser is a
+  heuristic, not a model. It abstains when unsure, so the cost of it being wrong
+  is one missed identification of a song the index learns on its next airing.
+- AzuraCast integration has not been exercised against a real instance.

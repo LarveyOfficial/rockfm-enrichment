@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS timeline (
     id         INTEGER PRIMARY KEY,
     start_ms   INTEGER NOT NULL,
     end_ms     INTEGER NOT NULL,
-    kind       TEXT    NOT NULL,  -- cancion / publicidad / programa / desconocido
+    kind       TEXT    NOT NULL,  -- cancion / programa / desconocido
     title      TEXT,
     artist     TEXT,
     album      TEXT,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS timeline (
     show_lead  TEXT,               -- presenter names
     show_image TEXT,
     confidence REAL,
-    source     TEXT,              -- local|shazamio|audd|acrcloud|schedule|repetition
+    source     TEXT,              -- local|shazamio|audd|acrcloud|schedule|gap
     cluster_id INTEGER,
     created_ms INTEGER NOT NULL
 );
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS fp_tracks (
     key         TEXT NOT NULL UNIQUE,
     title       TEXT,
     artist      TEXT,
-    source      TEXT,               -- preview|broadcast|repetition
+    source      TEXT,               -- preview|broadcast
     occurrences INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER,            -- release length, from iTunes/Deezer
     anchor_ms   INTEGER,            -- broadcast ms corresponding to reference offset 0
@@ -320,7 +320,8 @@ TIMELINE_COLUMNS = (
 def upsert_timeline(conn: sqlite3.Connection, item: dict, created_ms: int) -> None:
     """Insert a timeline item, replacing anything already covering that span.
 
-    The analyzer and the classifier both write here, so the clear-then-insert
+    Songs and the gaps between them are written as the scan settles them, so
+    the clear-then-insert
     runs as one transaction; interleaved halves would leave a hole in the
     timeline or two rows claiming the same moment.
     """

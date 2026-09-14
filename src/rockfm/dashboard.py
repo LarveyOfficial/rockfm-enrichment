@@ -75,6 +75,7 @@ button:disabled{opacity:.4;cursor:default}
 .detail .now{font-size:1.02rem;font-weight:600;margin:0 0 2px}
 .detail .sub{color:var(--dim);margin:0 0 10px;font-size:.83rem}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.note{margin-top:10px;font-size:.76rem;color:var(--warn)}
 
 table{width:100%;border-collapse:collapse;font-size:.76rem}
 th{text-align:left;color:var(--dim);font-weight:600;padding:5px 8px;
@@ -303,6 +304,8 @@ function select(it) {
           <button onclick="playFrom(${it.start} - 15000, 45)">hear the start boundary</button>
           <button onclick="playFrom(${it.end} - 15000, 45)">hear the end boundary</button>
         </div>
+        <div id="note" class="note" style="display:none"></div>
+        <div id="progress" class="muted" style="margin-top:8px;font-size:.76rem"></div>
       </div>
     </div>`;
   renderTrack(); renderRows();
@@ -316,16 +319,28 @@ function playFrom(startMs, seconds) {
     hls = new Hls();
     hls.loadSource(url);
     hls.attachMedia(audio);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => audio.play().catch(() => {}));
   } else {
     audio.src = url;
-    audio.play().catch(() => {});
   }
+  // play() must be called straight from the click. Deferring it to hls.js's
+  // MANIFEST_PARSED callback loses the user-gesture context that autoplay
+  // policy requires, and playback silently never starts even though every
+  // segment downloads.
+  audio.play().then(() => setNote('')).catch(() => {
+    setNote('Your browser blocked playback — press play again.');
+  });
   el('stop').disabled = false;
   el('head').style.display = 'block';
 }
 
+function setNote(text) {
+  const note = el('note');
+  if (note) { note.textContent = text; note.style.display = text ? 'block' : 'none'; }
+}
+
 function stopAudio() {
+  const progress = el('progress');
+  if (progress) progress.textContent = '';
   audio.pause();
   if (hls) { hls.destroy(); hls = null; }
   audio.removeAttribute('src');
@@ -339,6 +354,8 @@ function stopAudio() {
 audio.addEventListener('timeupdate', () => {
   if (replayStart == null || !range) return;
   const at = replayStart + audio.currentTime * 1000;
+  const progress = el('progress');
+  if (progress) progress.textContent = `playing · ${clock(at)} (+${dur(audio.currentTime)})`;
   const span = range.end - range.start;
   const head = el('head');
   if (at < range.start || at > range.end || span <= 0) { head.style.display = 'none'; return; }

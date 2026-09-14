@@ -302,7 +302,10 @@ class Playout:
             )
             out.append(
                 hlsutil.OutSegment(
-                    uri=f"{SEGMENT_PREFIX}{row['pdt_ms']}.aac",
+                    # Absolute, unlike the live playlist. This one is served
+                    # from the root, so a relative URI would resolve to /s*.aac
+                    # and every segment would 404.
+                    uri=f"/hls/{SEGMENT_PREFIX}{row['pdt_ms']}.aac",
                     duration=row["duration_ms"] / 1000,
                     pdt=datetime.fromtimestamp(row["pdt_ms"] / 1000, tz=UTC),
                     discontinuity=discontinuity,
@@ -412,9 +415,18 @@ def create_app(config: Config | None = None) -> FastAPI:
     @app.get("/api/timeline")
     def timeline(start: int | None = None, end: int | None = None, hours: float = 2.0) -> JSONResponse:
         latest = db.latest_segment(state.conn)
+        earliest = db.earliest_segment(state.conn)
         anchor = latest["pdt_ms"] if latest else int(datetime.now(UTC).timestamp() * 1000)
         end_ms = end if end is not None else anchor
-        start_ms = start if start is not None else end_ms - int(hours * 3600 * 1000)
+        if start is not None:
+            start_ms = start
+        else:
+            # Asking for two hours when only twenty minutes exist would squeeze
+            # everything into a sliver at the right-hand edge, so the window is
+            # clamped to what has actually been recorded.
+            start_ms = end_ms - int(hours * 3600 * 1000)
+            if earliest is not None:
+                start_ms = max(start_ms, earliest["pdt_ms"])
         return JSONResponse(
             {"range": {"start": start_ms, "end": end_ms},
              "items": state.timeline(start_ms, end_ms)},

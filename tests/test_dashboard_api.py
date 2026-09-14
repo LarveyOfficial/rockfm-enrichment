@@ -118,3 +118,58 @@ def test_dashboard_page_renders(env):
     body = client.get("/dashboard").text
     assert "RockFM pipeline" in body
     assert "/api/status" in body
+
+
+def test_timeline_window_is_clamped_to_what_was_recorded(env):
+    """Asking for hours of history when minutes exist should not render a sliver."""
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 600_000, 100)  # ten minutes
+
+    payload = client.get("/api/timeline?hours=6").json()
+    span_minutes = (payload["range"]["end"] - payload["range"]["start"]) / 60_000
+    assert span_minutes < 15
+
+
+def test_explicit_range_is_never_clamped(env):
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 600_000, 100)
+    start, end = now - 7_200_000, now
+    payload = client.get(f"/api/timeline?start={start}&end={end}").json()
+    assert payload["range"]["start"] == start
+
+
+def test_replay_segment_uris_point_at_the_segment_route(env):
+    """The replay playlist is served from the root, so relative URIs would 404."""
+    _, conn, client = env
+    start = 1_700_000_000_000
+    record(conn, start, 3)
+    body = client.get(f"/replay.m3u8?start={start}&duration=30").text
+    uris = [line for line in body.splitlines() if line and not line.startswith("#")]
+    assert uris, "playlist listed no segments"
+    for uri in uris:
+        assert uri.startswith("/hls/s"), uri
+        # And that route must actually exist.
+        assert client.get(uri).status_code in (200, 404)
+    assert client.get(uris[0]).status_code == 404  # row exists, file does not
+
+
+def test_replay_segments_are_actually_reachable(env, tmp_path):
+    """End to end: every URI in the playlist resolves to real bytes."""
+    config, conn, client = env
+    start = 1_700_000_000_000
+    for index in range(3):
+        name = f"{index}.aac"
+        (config.segments_dir / name).write_bytes(b"\xff\xf1" + b"\x00" * 64)
+        db.insert_segment(
+            conn, pdt_ms=start + index * 6000, seq=index, duration_ms=6000,
+            relpath=name, size=66, fetched_ms=0,
+        )
+    body = client.get(f"/replay.m3u8?start={start}&duration=30").text
+    uris = [line for line in body.splitlines() if line and not line.startswith("#")]
+    assert len(uris) == 3
+    for uri in uris:
+        response = client.get(uri)
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/aac"

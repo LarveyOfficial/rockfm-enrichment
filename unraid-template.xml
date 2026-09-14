@@ -19,9 +19,23 @@
     audio and the corrected metadata into AzuraCast.
 
     The station's own stream metadata is ignored: it runs hours to days behind.
+
+    &#13;
+    The image is not published to any registry. Build it on the server first:&#13;
+    &#13;
+    &#160;&#160;git clone &lt;your repo&gt; /mnt/user/appdata/rockfm-src&#13;
+    &#160;&#160;cd /mnt/user/appdata/rockfm-src&#13;
+    &#160;&#160;docker build -t rockfm-enrichment:latest .&#13;
+    &#13;
+    Add --build-arg INCLUDE_SEGMENTER=false for a much smaller image without the
+    speech/music model; set SEGMENTER=light to match.&#13;
+    &#13;
+    NOTE: with the default six hour delay there is nothing to play for the first
+    six hours after a fresh start. That is the buffer filling, not a fault - the
+    dashboard shows a countdown, and the health check stays green throughout.
   </Overview>
   <Category>MediaApp:Music Tools:Utilities</Category>
-  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <WebUI>http://[IP]:[PORT:8080]/dashboard</WebUI>
   <Icon/>
   <ExtraParams/>
   <PostArgs/>

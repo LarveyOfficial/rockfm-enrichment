@@ -12,6 +12,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+# Where the analyzer has read up to. Kept here rather than in analyzer.py so the
+# web process can report progress without importing the numeric stack.
+ANALYZER_CURSOR_KEY = "analyzer_cursor_ms"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS segments (
     pdt_ms      INTEGER PRIMARY KEY,   -- EXT-X-PROGRAM-DATE-TIME, epoch ms UTC

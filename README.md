@@ -77,6 +77,23 @@ Then point a player at `http://<host>:8080/hls/playlist.m3u8`, or open
 `http://<host>:8080/` for a small web player. On Unraid, use
 `unraid-template.xml`.
 
+### The dashboard
+
+`http://<host>:8080/dashboard` shows what the pipeline is actually doing: the
+recorded buffer as a colour-coded timeline, every boundary the analyzer chose,
+the metadata attached to each item, and how it was identified -- local
+fingerprint or external recogniser, with its confidence.
+
+Crucially it plays any of it back **immediately**, without waiting out the delay.
+Click a song to hear it from its start, or use *hear the start/end boundary* to
+play the fifteen seconds either side of a transition. A playhead tracks across
+the timeline while audio plays, so you can see whether a boundary lands where it
+sounds like it should. That is the intended way to judge how well recognition is
+working before trusting it.
+
+It is a read-only view on `/api/status`, `/api/timeline` and `/replay.m3u8`; it
+changes nothing.
+
 The first run seeds the fingerprint index from RockFM's 951-track rotation
 catalog. That takes around twenty minutes in the background and happens once;
 playout works throughout.

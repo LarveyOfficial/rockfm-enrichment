@@ -64,7 +64,7 @@ MIN_LOCAL_SCORE = 0.02
 # probe to be *mostly* that song -- so the last probe that passes sits about half
 # a probe-length before the real transition.
 EDGE_MIN_SCORE = 0.25
-CURSOR_KEY = "analyzer_cursor_ms"
+CURSOR_KEY = db.ANALYZER_CURSOR_KEY
 
 
 @dataclass

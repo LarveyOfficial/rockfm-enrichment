@@ -135,20 +135,34 @@ class OutSegment:
 
 
 def build_media_playlist(
-    segments: list[OutSegment], media_sequence: int, target_duration: int
+    segments: list[OutSegment],
+    media_sequence: int,
+    target_duration: int,
+    *,
+    vod: bool = False,
 ) -> str:
+    """Build a media playlist.
+
+    `vod` marks the playlist complete, which is what lets a player seek freely
+    through it -- used for replaying a stretch of the buffer on demand rather
+    than following the delayed live edge.
+    """
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
         f"#EXT-X-TARGETDURATION:{target_duration}",
         f"#EXT-X-MEDIA-SEQUENCE:{media_sequence}",
     ]
+    if vod:
+        lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
     for segment in segments:
         if segment.discontinuity:
             lines.append("#EXT-X-DISCONTINUITY")
         lines.append(f"#EXT-X-PROGRAM-DATE-TIME:{format_datetime(segment.pdt)}")
         lines.append(f"#EXTINF:{segment.duration:.3f},")
         lines.append(segment.uri)
+    if vod:
+        lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
 

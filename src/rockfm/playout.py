@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from . import db, hlsutil, labels
 from . import strings_es as S
 from .config import Config
+from .dashboard import DASHBOARD_HTML
 from .timeshift import DelayController, playout_position, source_wallclock
 
 log = logging.getLogger("rockfm.playout")
@@ -199,6 +200,118 @@ class Playout:
             return "filling", (earliest["pdt_ms"] - position) / 1000
         return "stalled", None
 
+    # --- dashboard support ---
+
+    def timeline(self, start_ms: int, end_ms: int) -> list[dict]:
+        """Everything the analyzer and classifier worked out over a span."""
+        items = []
+        for row in db.timeline_between(self.conn, start_ms, end_ms):
+            primary, secondary = self._render(row)
+            items.append(
+                {
+                    "start": row["start_ms"],
+                    "end": row["end_ms"],
+                    "duration": (row["end_ms"] - row["start_ms"]) / 1000,
+                    "kind": row["kind"],
+                    "primary": primary,
+                    "secondary": secondary,
+                    "title": row["title"],
+                    "artist": row["artist"],
+                    "album": row["album"],
+                    "year": row["year"],
+                    "art": row["art_url"],
+                    "show": row["show_title"],
+                    "confidence": row["confidence"],
+                    "source": row["source"],
+                }
+            )
+        return items
+
+    def status(self) -> dict:
+        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        earliest = db.earliest_segment(self.conn)
+        latest = db.latest_segment(self.conn)
+        state, remaining = self.buffer_state()
+        cursor_raw = db.get_meta(self.conn, db.ANALYZER_CURSOR_KEY)
+        cursor = int(cursor_raw) if cursor_raw else None
+
+        counts = {
+            "segments": db.segment_count(self.conn),
+            "items": self.conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0],
+            "songs": self.conn.execute(
+                "SELECT COUNT(*) FROM timeline WHERE kind = ?", (S.KIND_CANCION,)
+            ).fetchone()[0],
+            "learned_songs": self.conn.execute(
+                "SELECT COUNT(*) FROM fp_tracks WHERE kind = 'music'"
+            ).fetchone()[0],
+            "repeat_clusters": self.conn.execute(
+                "SELECT COUNT(*) FROM fp_tracks WHERE kind = 'nonmusic'"
+            ).fetchone()[0],
+        }
+
+        return {
+            "now": now_ms,
+            "delay_seconds": self.delay.current,
+            "source_timezone": self.config.source_tz_name,
+            "source_time": source_wallclock(self.config, datetime.now(UTC)).isoformat(),
+            "buffer": {
+                "state": state,
+                "seconds_until_ready": remaining,
+                "earliest": earliest["pdt_ms"] if earliest else None,
+                "latest": latest["pdt_ms"] if latest else None,
+                "seconds": (
+                    (latest["pdt_ms"] - earliest["pdt_ms"]) / 1000 if earliest and latest else 0
+                ),
+                "ingest_lag_seconds": (now_ms - latest["pdt_ms"]) / 1000 if latest else None,
+            },
+            "analyzer": {
+                "cursor": cursor,
+                # How far the analyzer still is from the newest recorded audio.
+                # In steady state this stays small; a growing number means it is
+                # falling behind the recorder.
+                "behind_live_seconds": (
+                    (latest["pdt_ms"] - cursor) / 1000 if cursor and latest else None
+                ),
+            },
+            "playout": {"position": self.position_ms()},
+            "gaps": [
+                {"after": row["after_pdt_ms"], "before": row["before_pdt_ms"],
+                 "missing_seconds": row["missing_ms"] / 1000}
+                for row in db.gaps_between(
+                    self.conn, earliest["pdt_ms"] if earliest else 0, now_ms
+                )
+            ],
+            "counts": counts,
+        }
+
+    def replay_playlist(self, start_ms: int, duration_s: float) -> str:
+        """A complete playlist for one stretch of the buffer.
+
+        Marked VOD so a player can seek through it: this is for auditing what
+        the analyzer decided, not for following the delayed live edge.
+        """
+        rows = db.segments_between(self.conn, start_ms, start_ms + int(duration_s * 1000))
+        if not rows:
+            raise HTTPException(status_code=404, detail="nothing recorded for that span")
+
+        out: list[hlsutil.OutSegment] = []
+        previous: sqlite3.Row | None = None
+        for row in rows:
+            discontinuity = previous is not None and (
+                row["pdt_ms"] - (previous["pdt_ms"] + previous["duration_ms"]) > GAP_TOLERANCE_MS
+            )
+            out.append(
+                hlsutil.OutSegment(
+                    uri=f"{SEGMENT_PREFIX}{row['pdt_ms']}.aac",
+                    duration=row["duration_ms"] / 1000,
+                    pdt=datetime.fromtimestamp(row["pdt_ms"] / 1000, tz=UTC),
+                    discontinuity=discontinuity,
+                )
+            )
+            previous = row
+        target = max(1, round(max(item.duration for item in out)))
+        return hlsutil.build_media_playlist(out, rows[0]["seq"], target, vod=True)
+
     def health(self) -> dict:
         latest = db.latest_segment(self.conn)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
@@ -296,6 +409,30 @@ def create_app(config: Config | None = None) -> FastAPI:
             state.now_playing(), headers={"Access-Control-Allow-Origin": "*"}
         )
 
+    @app.get("/api/timeline")
+    def timeline(start: int | None = None, end: int | None = None, hours: float = 2.0) -> JSONResponse:
+        latest = db.latest_segment(state.conn)
+        anchor = latest["pdt_ms"] if latest else int(datetime.now(UTC).timestamp() * 1000)
+        end_ms = end if end is not None else anchor
+        start_ms = start if start is not None else end_ms - int(hours * 3600 * 1000)
+        return JSONResponse(
+            {"range": {"start": start_ms, "end": end_ms},
+             "items": state.timeline(start_ms, end_ms)},
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+    @app.get("/api/status")
+    def status() -> JSONResponse:
+        return JSONResponse(state.status(), headers={"Access-Control-Allow-Origin": "*"})
+
+    @app.get("/replay.m3u8")
+    def replay(start: int, duration: float = 900.0) -> Response:
+        return no_cache(state.replay_playlist(start, duration), M3U8_TYPE)
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard() -> HTMLResponse:
+        return HTMLResponse(DASHBOARD_HTML)
+
     @app.get("/api/health")
     def health() -> JSONResponse:
         payload = state.health()
@@ -342,6 +479,7 @@ button:disabled{opacity:.5;cursor:default}
   <div class="row"><span id="elapsed">--:--</span><span id="duration">--:--</span></div>
   <button id="play">Escuchar</button>
   <div class="meta" id="meta"></div>
+  <div class="meta"><a href="/dashboard" style="color:inherit">panel de control</a></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.17/hls.min.js"></script>
 <script>

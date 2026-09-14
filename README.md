@@ -115,8 +115,11 @@ the timeline while audio plays, so you can see whether a boundary lands where it
 sounds like it should. That is the intended way to judge how well recognition is
 working before trusting it.
 
-It is a read-only view on `/api/status`, `/api/timeline` and `/replay.m3u8`; it
-changes nothing.
+**Re-analyze buffer** sends the analyzer back over everything still recorded.
+Its cursor only moves forward, so a change to how audio is interpreted never
+reaches anything already scanned -- this is how you apply one to the last 24
+hours. The fingerprint index is untouched, so nothing learned or seeded is lost,
+and a warm index makes the second pass far quicker than the first.
 
 The first run seeds the fingerprint index from RockFM's 951-track rotation
 catalog. That takes around twenty minutes in the background and happens once;

@@ -182,3 +182,26 @@ def test_status_reports_scan_progress(env):
     analyzer = client.get("/api/status").json()["analyzer"]
     assert analyzer["state"] == "scanning"
     assert analyzer["progress"] == "21/37"
+
+
+def test_reanalyze_rewinds_the_analyzer_without_losing_what_it_learned(env):
+    """A fix to how audio is read never reaches anything already scanned."""
+    from rockfm.fingerprint import FingerprintIndex
+
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 600_000, 100)
+    db.set_meta(conn, db.ANALYZER_CURSOR_KEY, str(now))
+    track_id = FingerprintIndex(conn).add(
+        kind="music", key="a|b", hashes=[(1, 0), (2, 1)], title="b"
+    )
+
+    response = client.post("/api/reanalyze")
+    assert response.status_code == 200
+    assert response.json()["restarted"] is True
+
+    # The cursor is gone, so the next pass starts from the buffer again.
+    assert db.get_meta(conn, db.ANALYZER_CURSOR_KEY) is None
+    # Everything learned survives; re-seeding would cost twenty minutes.
+    assert FingerprintIndex(conn).get(track_id) is not None
+    assert conn.execute("SELECT COUNT(*) FROM fp_hashes").fetchone()[0] == 2

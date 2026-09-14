@@ -504,6 +504,29 @@ def create_app(config: Config | None = None) -> FastAPI:
         saved = appearance.save(state.conn, payload, state.language)
         return JSONResponse({"current": saved}, headers={"Access-Control-Allow-Origin": "*"})
 
+    @app.post("/api/reanalyze")
+    def reanalyze() -> JSONResponse:
+        """Send the analyzer back over the audio still in the buffer.
+
+        Its cursor only moves forward, so a fix to how audio is interpreted
+        never reaches anything already scanned. Clearing the cursor re-runs the
+        whole buffer without touching the fingerprint index, so nothing learned
+        or seeded is lost -- and with a warm index most of it resolves locally,
+        which makes a second pass far quicker than the first.
+        """
+        state.conn.execute(
+            "DELETE FROM meta WHERE key = ?", (db.ANALYZER_CURSOR_KEY,)
+        )
+        earliest = db.earliest_segment(state.conn)
+        return JSONResponse(
+            {
+                "restarted": True,
+                "from": _iso(earliest["pdt_ms"]) if earliest else None,
+                "buffered_seconds": state.status()["buffer"]["seconds"],
+            },
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
     @app.get("/api/settings")
     def get_settings() -> JSONResponse:
         return JSONResponse(

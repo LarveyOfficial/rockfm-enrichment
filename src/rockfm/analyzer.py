@@ -84,6 +84,12 @@ RELEARN_GROWTH_MS = 90_000
 # removes the bias.
 EXTEND_STEP_MS = 6_000
 EXTEND_LIMIT_MS = 24_000
+# External calls an edge may spend when the index cannot speak for the audio.
+# Extension runs before the song is learned, so the reference is whatever named
+# it -- a 12 s probe, or a 30 s catalogue preview. Asking only the index there
+# stops at the reference's coverage rather than the song's end, which put every
+# edge short and invented gaps between songs that actually abut.
+EXTEND_EXTERNAL_BUDGET = 2
 BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # floor for songs of unknown length
 # A song has to run for a decent share of itself to count as having been played.
@@ -675,34 +681,58 @@ class Analyzer:
         six second increments until identification stops costs a handful of
         probes -- local ones, once the song is known -- and removes the bias.
 
-        Both loops ask the local index and nothing else. The reference is
-        grounded first (see `_ground_reference`), so "is this still the same
-        song?" is answerable in milliseconds without leaving the process --
-        which is the only sensible way to ask it eight times per song, on every
-        probe of every window.
+        Each edge asks the index first and pays for an answer only when the
+        index has none -- see `_continues`. Each direction gets its own small
+        budget, so a song costs a few calls to bound properly rather than the
+        eight it once spent asking questions it already had answers to.
         """
         if run.key is None:
             return
 
+        budget = [EXTEND_EXTERNAL_BUDGET]
         reach = run.last_ms
         while reach - run.last_ms < EXTEND_LIMIT_MS:
             candidate = reach + EXTEND_STEP_MS
             if not window.covers(candidate):
                 break
-            if not self._same_track(window, candidate, run.key):
+            if not self._continues(window, candidate, run.key, budget):
                 break
             reach = candidate
         run.last_ms = reach
 
+        budget = [EXTEND_EXTERNAL_BUDGET]
         start = run.first_ms
         while run.first_ms - start < EXTEND_LIMIT_MS:
             candidate = start - EXTEND_STEP_MS
             if candidate < window.start_ms or not window.covers(candidate):
                 break
-            if not self._same_track(window, candidate, run.key):
+            if not self._continues(window, candidate, run.key, budget):
                 break
             start = candidate
         run.first_ms = start
+
+    def _continues(
+        self, window: Window, at_ms: int, key: str, budget: list[int]
+    ) -> bool:
+        """Is `key` still playing at `at_ms`?
+
+        The index answers for free wherever it has been taught. At an edge it
+        usually has not been: extension runs before the song is learned, so the
+        reference is only whatever named it. A local miss there is therefore not
+        evidence the song ended -- it may just mean we have run out of
+        reference, and treating the two the same is what put every edge short.
+
+        So when the index has nothing to say, buy one answer, up to a fixed
+        budget per edge. Once the run is committed the whole aired span is
+        learned, and later airings resolve the same edges locally throughout.
+        """
+        if self._same_track(window, at_ms, key):
+            return True
+        if budget[0] <= 0 or self._recognizer_degraded():
+            return False
+        budget[0] -= 1
+        found = self._identify(window, at_ms, retry=False)
+        return found is not None and found.key == key
 
     def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Teach a span, unless this window already taught one covering it."""

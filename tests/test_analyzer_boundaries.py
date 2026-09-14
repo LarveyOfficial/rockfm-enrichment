@@ -29,6 +29,10 @@ from rockfm.analyzer import (
 )
 from rockfm.config import Config
 from rockfm.recognize.base import NullRecognizer
+from rockfm.rockfm_api import catalog_key
+
+ARTIST, TITLE = "Def Leppard", "Let's Get Rocked"
+KEY = catalog_key(ARTIST, TITLE)
 
 RATE = 16_000
 # Deliberately different lengths; the bug made them all identical.
@@ -432,15 +436,8 @@ def test_a_miss_is_only_second_guessed_where_it_costs_something(tmp_path):
     assert len(calls) == 1
 
 
-def test_extension_never_reaches_for_the_network(tmp_path):
-    """Finding a song's edge must not cost a single external lookup.
-
-    Extension steps out every six seconds, in both directions, for every run,
-    on every probe of every window. Answered locally that is free. Answered
-    over the network it was eight lookups per song just to locate an edge --
-    which, with a freshly identified song having only its twelve second probe
-    as a reference, is exactly what it had become.
-    """
+def _extending(tmp_path, local_reaches_to, answer):
+    """A run being extended where the index stops answering partway out."""
     from rockfm.analyzer import Run
 
     analyzer = build(tmp_path)
@@ -448,20 +445,73 @@ def test_extension_never_reaches_for_the_network(tmp_path):
 
     def external(_window, at_ms):
         calls.append(at_ms)
-        return None
+        return answer
 
     analyzer._external = external
     analyzer._ground_reference = lambda _w, _r: None
-    analyzer._same_track = lambda _w, at, key, s=0.0: at <= 150_000
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
+    analyzer._same_track = lambda _w, at, key, s=0.0: at <= local_reaches_to
 
-    run = Run(key="foreigner", label=None, first_ms=48_000, last_ms=120_000)
-    run.label = Label(key="foreigner", artist="x", title="t", source="s",
+    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
+    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
                       confidence=1.0, track_id=1)
-    analyzer._extend_run(window, run)
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
+    return run, calls, analyzer
 
-    assert run.last_ms > 120_000, "the run never reached out"
+
+def test_a_local_miss_at_an_edge_is_not_proof_the_song_ended(tmp_path):
+    """The index cannot speak for audio it was never taught.
+
+    Extension runs before the song is learned, so the reference is only the
+    probe that named it. Treating "the index has nothing to say" as "the song
+    stopped" put every edge short -- 25s off the end of a Def Leppard track --
+    and invented gaps between songs that actually abut.
+    """
+    from rockfm.recognize.base import Recognition
+
+    still_playing = Recognition(artist=ARTIST, title=TITLE, provider="stub")
+    run, calls, _ = _extending(tmp_path, local_reaches_to=300_000, answer=still_playing)
+
+    # The index gave up after the first step; the recogniser carried it further.
+    assert calls, "extension gave up the moment the index ran out of reference"
+    assert run.last_ms > 306_000
+
+
+def test_an_edge_cannot_spend_more_than_its_budget(tmp_path):
+    """Bounded, because the old unbounded version cost eight calls a song.
+
+    The index answers nowhere here and the recogniser always says yes, so
+    extension would walk to its full limit in both directions if nothing
+    stopped it. What stops it is the budget, and this pins the exact number.
+    """
+    from rockfm.analyzer import EXTEND_EXTERNAL_BUDGET
+    from rockfm.recognize.base import Recognition
+
+    still_playing = Recognition(artist=ARTIST, title=TITLE, provider="stub")
+    run, calls, _ = _extending(tmp_path, local_reaches_to=-1, answer=still_playing)
+
+    assert len(calls) == EXTEND_EXTERNAL_BUDGET * 2, calls
+    # It really did move both edges out on those answers.
+    assert run.last_ms > 300_000 and run.first_ms < 300_000
+
+
+def test_a_failing_recogniser_is_not_asked_to_extend(tmp_path):
+    """A dead service must not be consulted twice per song, per window."""
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    calls: list[int] = []
+    analyzer._external = lambda _w, at: calls.append(at)
+    analyzer._ground_reference = lambda _w, _r: None
+    analyzer._same_track = lambda _w, at, key, s=0.0: False
+    analyzer._recognizer_degraded = lambda: True
+
+    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
+    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
+                      confidence=1.0, track_id=1)
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
+
     assert calls == []
 
 

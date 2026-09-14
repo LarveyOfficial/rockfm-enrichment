@@ -24,7 +24,6 @@ import uvicorn  # noqa: E402
 
 from rockfm import db, hlsutil, ingest, playout  # noqa: E402
 from rockfm.analyzer import Analyzer  # noqa: E402
-from rockfm.classify.decide import Classifier  # noqa: E402
 from rockfm.config import Config  # noqa: E402
 
 
@@ -52,11 +51,10 @@ def main() -> None:
     time.sleep(args.seconds)
 
     conn = db.connect(config.db_path)
-    print("\nanalyzing + classifying ...\n", flush=True)
+    print("\nanalyzing ...\n", flush=True)
     analyzer = Analyzer(config, conn)
     while analyzer.run_once() > 0:
         pass
-    Classifier(config, conn).run_once()
 
     # In production the delay is ~6h, so playout only ever reaches audio the
     # analyzer finished with hours ago. Compressing that into a few minutes means

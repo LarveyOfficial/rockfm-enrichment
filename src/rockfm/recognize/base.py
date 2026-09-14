@@ -39,7 +39,10 @@ class Recognizer(Protocol):
 
 # Seconds between calls when the recogniser is healthy. See
 # `settings.recognizer_interval_seconds`, which overrides this at runtime.
-DEFAULT_MIN_INTERVAL = 12.0
+# Pacing is opt-in: the backoff and circuit breaker below already handle a
+# recogniser that pushes back, and they do it on evidence rather than on
+# suspicion, without taxing every probe that would have succeeded.
+DEFAULT_MIN_INTERVAL = 0.0
 
 # Consecutive failures before the external recogniser is left alone entirely.
 OPEN_AFTER_ERRORS = 4

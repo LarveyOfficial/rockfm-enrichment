@@ -38,11 +38,13 @@ FIELDS: Final[dict[str, tuple[Any, str, str]]] = {
     # One asks whether a non-song stretch is worth naming at all; the other how
     # much of a gap between two songs is just the crossfade. A station with long
     # crossfades and short jingles needs them set differently.
-    # Seconds between external lookups. The free recogniser is an unofficial,
-    # shared endpoint: lean on it and it stops answering rather than saying no,
-    # which costs the full request timeout every time. Slow and answering beats
-    # fast and refused, so this errs high -- the local index carries the repeats.
-    "recognizer_interval_seconds": (12.0, "RECOGNIZER_INTERVAL_SECONDS", "number"),
+    # Seconds to leave between external lookups. Zero by default: ShazamIO
+    # publishes no rate limit, and pacing every probe on the suspicion of one
+    # simply moves the bottleneck into our own code -- set to twelve seconds it
+    # became the single largest cost in a scan, twelve seconds per probe against
+    # a local match that takes twenty-seven milliseconds. Raise it only if a
+    # recogniser is observed refusing calls.
+    "recognizer_interval_seconds": (0.0, "RECOGNIZER_INTERVAL_SECONDS", "number"),
     "min_nonmusic_seconds": (5.0, "MIN_NONMUSIC_SECONDS", "number"),
     "max_seam_seconds": (10.0, "MAX_SEAM_SECONDS", "number"),
     "azuracast_enabled": (False, "", "bool"),

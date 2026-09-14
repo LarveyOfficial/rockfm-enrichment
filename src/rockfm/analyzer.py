@@ -89,7 +89,13 @@ EXTEND_LIMIT_MS = 24_000
 # it -- a 12 s probe, or a 30 s catalogue preview. Asking only the index there
 # stops at the reference's coverage rather than the song's end, which put every
 # edge short and invented gaps between songs that actually abut.
-EXTEND_EXTERNAL_BUDGET = 2
+#
+# Enough to walk the whole way out. Grounding covers to one probe past the last
+# match, and a probe *starting* there already reaches beyond it, so the index
+# answers for a step at most -- which made a smaller budget, not EXTEND_LIMIT_MS,
+# the real stopping point. A song ended thirteen seconds early on a budget worth
+# twelve. The limit above is the bound; this must not quietly undercut it.
+EXTEND_EXTERNAL_BUDGET = EXTEND_LIMIT_MS // EXTEND_STEP_MS
 BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # floor for songs of unknown length
 # A song has to run for a decent share of itself to count as having been played.
@@ -485,13 +491,22 @@ class Analyzer:
 
     # --- main pass ---
 
-    def _identify(self, window: Window, at_ms: int, *, retry: bool = True) -> Label | None:
+    def _identify(
+        self, window: Window, at_ms: int, *, retry: bool = True, gate: bool = True
+    ) -> Label | None:
         """Name the audio at `at_ms`, independently of any neighbouring probe.
 
         `retry` is for callers who are asking a question a miss already answers.
         Shifting along and asking again earns its keep during the scan, where a
         miss writes off a whole 24s stretch -- but not where the miss is the
         expected result.
+
+        `gate` skips the speech check. It belongs to the scan, which is asking
+        the open question "is anything playing here?", and speech is a fair
+        answer to that. It does not belong to a caller asking whether one known
+        song is still running: a presenter talking over an outro reads as speech
+        while the song plays on underneath, and ending the song there is the
+        error the check would cause.
         """
         match = self._local(window, at_ms)
         if match is not None:
@@ -505,7 +520,7 @@ class Analyzer:
                 track_id=match.track_id,
             )
 
-        if self._is_speech(window, at_ms):
+        if gate and self._is_speech(window, at_ms):
             return None
 
         found = self._external(window, at_ms)
@@ -760,7 +775,7 @@ class Analyzer:
         if budget[0] <= 0 or self._recognizer_degraded():
             return False
         budget[0] -= 1
-        found = self._identify(window, at_ms, retry=False)
+        found = self._identify(window, at_ms, retry=False, gate=False)
         return found is not None and found.key == key
 
     def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:

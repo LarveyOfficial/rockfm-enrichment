@@ -566,3 +566,55 @@ def test_the_speech_gate_can_be_turned_off(tmp_path):
     samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
     analyzer._identify(Window(0, MIN_WINDOW_MS, samples), 60_000)
     assert calls != []
+
+
+def test_a_presenter_over_the_outro_does_not_end_the_song(tmp_path):
+    """The speech check belongs to the scan, not to extension.
+
+    The scan asks an open question -- is anything playing here? -- and speech
+    is a fair answer. Extension asks whether one known song is still running,
+    and there a DJ talking over the outro reads as speech while the song plays
+    on underneath. Applying the check there ended songs at the talk-over: Stand
+    By Me was cut thirteen seconds short.
+    """
+    from rockfm.analyzer import Run
+    from rockfm.recognize.base import Recognition
+
+    analyzer = build(tmp_path)
+    calls: list[int] = []
+
+    def external(_window, at_ms):
+        calls.append(at_ms)
+        return Recognition(artist=ARTIST, title=TITLE, provider="stub")
+
+    analyzer._external = external
+    analyzer._ground_reference = lambda _w, _r: None
+    analyzer._same_track = lambda _w, at, key, s=0.0: False
+    analyzer._is_speech = lambda _w, _at: True          # someone is talking
+
+    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
+    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
+                      confidence=1.0, track_id=1)
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
+
+    assert calls, "extension stopped at the talk-over instead of asking"
+    assert run.last_ms > 300_000
+
+
+def test_the_budget_can_reach_the_extension_limit(tmp_path):
+    """A budget smaller than the limit silently becomes the limit.
+
+    Grounding covers one probe past the last match, and a probe starting there
+    already reaches beyond it -- so the index answers for a step at most and
+    the budget does the rest of the walking. Set below LIMIT/STEP it stops the
+    walk early, which is how a song ended thirteen seconds short on a budget
+    worth twelve.
+    """
+    from rockfm.analyzer import (
+        EXTEND_EXTERNAL_BUDGET,
+        EXTEND_LIMIT_MS,
+        EXTEND_STEP_MS,
+    )
+
+    assert EXTEND_EXTERNAL_BUDGET * EXTEND_STEP_MS >= EXTEND_LIMIT_MS

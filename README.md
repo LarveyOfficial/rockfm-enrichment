@@ -61,7 +61,12 @@ never cuts a song in half.
 docker compose up -d --build
 ```
 
-Building with podman instead needs `--format docker`, otherwise the image is
+Pushes to `master` rebuild and publish the image automatically via GitHub
+Actions, using the workflow's own token -- no registry credentials are stored in
+the repository. Because dependencies are installed above `COPY src`, a
+code-only change reuses the heavy layers and finishes in about a minute.
+
+Building locally with podman needs `--format docker`, otherwise the image is
 written in OCI format and the `HEALTHCHECK` is silently dropped:
 
 ```bash
@@ -100,23 +105,22 @@ playout works throughout.
 
 ### On Unraid
 
-The image is not published to a registry, so build it on the server once:
+The image is published to GHCR, so there is nothing to build:
 
-```bash
-git clone <this repo> /mnt/user/appdata/rockfm-src
-cd /mnt/user/appdata/rockfm-src
-docker build -t rockfm-enrichment:latest .
+```
+ghcr.io/larveyofficial/rockfm-enrichment:latest
 ```
 
-Then copy `unraid-template.xml` to
+Copy `unraid-template.xml` to
 `/boot/config/plugins/dockerMan/templates-user/` and add the container from
 *Docker → Add Container → Template: user-defined*. The only setting that must be
 right is **Your Timezone**; the defaults cover everything else, and the AzuraCast
 fields can stay blank until you want them.
 
-For a much smaller image, build with `--build-arg INCLUDE_SEGMENTER=false` and
-set `SEGMENTER=light`. The classifier then abstains more often on speech rather
-than deciding.
+Only the full image is published. If the server is short on space, build locally
+with `--build-arg INCLUDE_SEGMENTER=false` and set `SEGMENTER=light` -- that
+drops the speech/music model and takes the image from ~2.7 GB to ~0.9 GB, at the
+cost of the classifier abstaining on speech rather than deciding.
 
 **Nothing plays for the first six hours.** That is the buffer filling to match
 the delay, not a fault: the dashboard shows a countdown and the health check

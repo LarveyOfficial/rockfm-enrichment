@@ -89,11 +89,10 @@ Then point a player at `http://<host>:8080/hls/playlist.m3u8`, or open
 
 ### Appearance
 
-Songs carry their own title, artist and cover. Everything else has nothing of
-its own, so what a player shows for adverts, presenter talk and unrecognised
-audio is set from the dashboard's **Appearance** panel and stored in the
-database. Leave a field blank to keep the built-in answer -- the real programme
-name and artwork for presenter talk, the station name for anything unrecognised.
+Songs carry their own title, artist and cover, and presenter talk takes the real
+programme name, presenters and artwork from RockFM's schedule. Advert breaks
+have nothing of their own, so their title, artist and artwork are set from the
+dashboard's **Appearance** panel and stored in the database.
 
 ### The dashboard
 

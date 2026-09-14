@@ -1,16 +1,14 @@
 """What each kind of timeline item shows, editable from the dashboard.
 
-Songs carry their own title, artist and cover. Everything else -- adverts,
-presenter talk, and stretches we could not place -- has nothing of its own, so
-what a player displays for them is a matter of taste. This holds that choice.
+Only adverts need this. Songs carry their own title, artist and cover;
+presenter talk and unplaced audio already take the real programme name,
+presenters and artwork from RockFM's own schedule, which beats anything a fixed
+default could say. An advert break is the one thing with nothing of its own.
 
 Stored as JSON in the meta table rather than as new columns, so an existing
 install picks it up on upgrade with no migration.
 
-A blank field means "use what we already know": the programme name and its
-artwork for presenter talk, the station name for anything unrecognised. That
-way the defaults stay useful and an override is only needed where the built-in
-answer is not wanted.
+A blank field falls back to the built-in Spanish default.
 """
 
 from __future__ import annotations
@@ -25,8 +23,9 @@ from . import strings_es as S
 META_KEY: Final = "appearance"
 FIELDS: Final = ("title", "artist", "art")
 
-# Gaps in the recording are not shown to anyone, so they need no appearance.
-CONFIGURABLE: Final = (S.KIND_PUBLICIDAD, S.KIND_PROGRAMA, S.KIND_DESCONOCIDO)
+# Gaps are never shown to anyone, songs describe themselves, and the rest take
+# their name and artwork from the station's schedule. Only adverts are left.
+CONFIGURABLE: Final = (S.KIND_PUBLICIDAD,)
 
 
 def defaults(language: str = "es") -> dict[str, dict[str, str]]:
@@ -36,10 +35,6 @@ def defaults(language: str = "es") -> dict[str, dict[str, str]]:
             "artist": S.text("publicidad.secondary", language),
             "art": "",
         },
-        # Blank throughout: presenter talk shows the real programme and its
-        # artwork, which is better than anything a fixed default could say.
-        S.KIND_PROGRAMA: {"title": "", "artist": "", "art": ""},
-        S.KIND_DESCONOCIDO: {"title": S.STATION_NAME, "artist": "", "art": ""},
     }
 
 

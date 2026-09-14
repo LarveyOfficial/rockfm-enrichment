@@ -27,14 +27,11 @@ def client(tmp_path):
 def test_defaults_are_returned_when_nothing_is_configured(conn):
     current = appearance.load(conn)
     assert current["publicidad"]["title"] == "Publicidad"
-    assert current["desconocido"]["title"] == "RockFM"
-    # Presenter talk is left blank on purpose: the real show name is better.
-    assert current["programa"]["title"] == ""
 
 
-def test_gaps_are_not_configurable():
-    assert "cancion" not in appearance.CONFIGURABLE
-    assert set(appearance.CONFIGURABLE) == {"publicidad", "programa", "desconocido"}
+def test_only_adverts_are_configurable():
+    """Everything else already has a real name and artwork of its own."""
+    assert set(appearance.CONFIGURABLE) == {"publicidad"}
 
 
 def test_saving_merges_and_persists(conn):
@@ -48,7 +45,7 @@ def test_saving_merges_and_persists(conn):
 def test_unknown_kinds_and_fields_are_ignored(conn):
     appearance.save(conn, {"cancion": {"title": "nope"}, "publicidad": {"bogus": "x"}})
     current = appearance.load(conn)
-    assert "cancion" not in current
+    assert set(current) == {"publicidad"}
     assert "bogus" not in current["publicidad"]
 
 
@@ -66,8 +63,8 @@ def test_configured_values_override_what_is_displayed(conn):
     assert (primary, secondary, art) == ("Anuncios", "Ya volvemos", "/art/ad.jpg")
 
 
-def test_a_blank_setting_falls_back_to_what_we_know(conn):
-    look = appearance.save(conn, {"programa": {"title": "", "artist": "", "art": ""}})
+def test_presenter_talk_always_uses_the_real_programme(conn):
+    look = appearance.load(conn)
     row = {
         "kind": "programa", "show_title": "El Pirata y su banda",
         "show_lead": "El Pirata", "art_url": "/art/show.jpg",
@@ -78,7 +75,7 @@ def test_a_blank_setting_falls_back_to_what_we_know(conn):
 
 
 def test_songs_are_never_overridden(conn):
-    look = appearance.save(conn, {"desconocido": {"title": "nope", "art": "/art/x.jpg"}})
+    look = appearance.save(conn, {"publicidad": {"title": "nope", "art": "/art/x.jpg"}})
     row = {
         "kind": "cancion", "artist": "Blondie", "title": "Denis",
         "album": "Plastic Letters", "year": 1977, "art_url": "/art/denis.jpg",
@@ -100,16 +97,16 @@ def test_rows_from_versions_with_more_kinds_still_render(conn):
 
 def test_get_appearance_reports_defaults_and_current(client):
     payload = client.get("/api/appearance").json()
-    assert set(payload["configurable"]) == {"publicidad", "programa", "desconocido"}
+    assert set(payload["configurable"]) == {"publicidad"}
     assert payload["fields"] == ["title", "artist", "art"]
     assert payload["current"]["publicidad"]["title"] == "Publicidad"
 
 
 def test_put_appearance_saves_and_survives_a_reread(client):
-    response = client.put("/api/appearance", json={"desconocido": {"title": "Rock FM 101"}})
+    response = client.put("/api/appearance", json={"publicidad": {"title": "Anuncios"}})
     assert response.status_code == 200
-    assert response.json()["current"]["desconocido"]["title"] == "Rock FM 101"
-    assert client.get("/api/appearance").json()["current"]["desconocido"]["title"] == "Rock FM 101"
+    assert response.json()["current"]["publicidad"]["title"] == "Anuncios"
+    assert client.get("/api/appearance").json()["current"]["publicidad"]["title"] == "Anuncios"
 
 
 def test_put_appearance_rejects_nonsense(client):

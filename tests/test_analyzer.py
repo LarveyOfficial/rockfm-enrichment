@@ -32,8 +32,12 @@ def test_group_merges_consecutive_identical_probes():
     assert runs[1].first_ms == 72_000
 
 
-def test_group_keeps_unidentified_stretches_separate():
-    probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
+def test_group_keeps_a_substantial_unidentified_stretch():
+    probes = [
+        (0, label("a")),
+        *[(24_000 * (i + 1), None) for i in range(4)],
+        (120_000, label("b")),
+    ]
     runs = Analyzer._group(probes)
     assert [run.key for run in runs] == ["a", None, "b"]
 
@@ -98,14 +102,48 @@ def test_group_bridges_a_single_unmatched_probe_inside_a_song():
     assert runs[0].last_ms == 48_000
 
 
-def test_group_does_not_bridge_two_unmatched_probes():
-    # A longer unidentified stretch is a real break, not a blip.
+def test_group_bridges_a_short_unidentified_stretch_inside_a_song():
+    """Meat Loaf arrived as 72s + 30s of nothing + 168s. It is one song."""
     probes = [(0, label("a")), (24_000, None), (48_000, None), (72_000, label("a"))]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == ["a"]
+    assert runs[0].last_ms == 72_000
+
+
+def test_group_does_not_bridge_a_real_break():
+    """Long enough and it is an advert break, not a passage of the song."""
+    from rockfm.analyzer import MAX_BRIDGE_MS, STEP_MS
+
+    gap = [(STEP_MS * (i + 1), None) for i in range(MAX_BRIDGE_MS // STEP_MS + 2)]
+    probes = [(0, label("a")), *gap, (gap[-1][0] + STEP_MS, label("a"))]
     runs = Analyzer._group(probes)
     assert [run.key for run in runs] == ["a", None, "a"]
 
 
-def test_group_does_not_bridge_between_different_songs():
+def test_group_never_merges_two_different_songs_together():
     probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
     runs = Analyzer._group(probes)
+    # The seam is dropped, but a and b stay distinct.
+    assert [run.key for run in runs] == ["a", "b"]
+
+
+def test_a_lone_probe_between_two_songs_is_the_transition_not_an_item():
+    """Otherwise every song change leaves six seconds of 'RockFM' behind."""
+    probes = [(0, label("a")), (24_000, None), (48_000, label("b"))]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == ["a", "b"]
+
+
+def test_a_real_break_between_two_songs_survives():
+    probes = [
+        (0, label("a")), (24_000, None), (48_000, None), (72_000, None),
+        (96_000, None), (120_000, label("b")),
+    ]
+    runs = Analyzer._group(probes)
     assert [run.key for run in runs] == ["a", None, "b"]
+
+
+def test_leading_and_trailing_unidentified_runs_are_kept():
+    probes = [(0, None), (24_000, label("a")), (48_000, None)]
+    runs = Analyzer._group(probes)
+    assert [run.key for run in runs] == [None, "a", None]

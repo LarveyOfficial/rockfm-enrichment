@@ -55,8 +55,18 @@ PROBE_MS = 12_000          # fixed by Shazam's signature format
 STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
 BISECT_LIMIT_MS = 2_000    # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # shorter runs are treated as non-music
-WINDOW_MS = 600_000        # decoded per pass
-MIN_WINDOW_MS = 300_000    # never nibble at the live edge -- see run_once
+# Windows must comfortably hold several songs. At five minutes a single track
+# fills one, so its boundaries land on the window edges instead of being found
+# in the audio -- which is how every song came out the same length.
+WINDOW_MS = 1_200_000      # decoded per pass
+MIN_WINDOW_MS = 900_000    # never nibble at the live edge -- see run_once
+
+# An unidentified stretch this short between two runs of the same song is a
+# passage the recogniser could not place, not a break. Meat Loaf arrived as
+# 72s + 30s of nothing + 168s; it is one song.
+MAX_BRIDGE_MS = 60_000
+# How far a run may exceed the release length before we stop trusting it.
+DURATION_TOLERANCE = 1.4
 TAIL_GUARD_MS = 90_000     # leave the newest audio alone; it may still be arriving
 MIN_LOCAL_SCORE = 0.02
 # Boundary tests need a stricter bar than identification. A probe only has to
@@ -203,6 +213,12 @@ class Analyzer:
         self.external_calls += 1
         return self.recognizer.recognize(probe, RECOGNIZE_RATE)
 
+    def _expected_ms(self, key: str) -> int | None:
+        """How long this song is supposed to run, per iTunes/Deezer."""
+        row = db.get_song_meta(self.conn, key)
+        value = row["duration_ms"] if row else None
+        return int(value) if value else None
+
     def _same_track(
         self, window: Window, at_ms: int, key: str, min_score: float = MIN_LOCAL_SCORE
     ) -> bool:
@@ -318,9 +334,28 @@ class Analyzer:
         track, then adds half a probe length: a 12 s probe stops being "mostly A"
         roughly six seconds before A actually ends.
         """
+        if earlier.key is None:
+            if later.key is None:
+                return later.first_ms
+            # Nothing identifiable before, a song after: find where the song
+            # starts by searching backwards for the earliest probe that is
+            # still it. Without this a track coming out of an advert break just
+            # snapped to the next scan position, up to a step late.
+            low, high = earlier.last_ms, later.first_ms
+            while high - low > BISECT_LIMIT_MS:
+                middle = (low + high) // 2
+                if not window.covers(middle):
+                    break
+                if self._same_track(window, middle, later.key, EDGE_MIN_SCORE):
+                    high = middle
+                else:
+                    low = middle
+            # The earliest probe that reads as the new song begins half a probe
+            # before the song itself does, so the boundary sits half a probe
+            # after that -- the mirror of the rule used for endings below.
+            return max(high + PROBE_MS // 2, earlier.first_ms)
+
         key = earlier.key
-        if key is None:
-            return later.first_ms
         low, high = earlier.last_ms, later.first_ms
         while high - low > BISECT_LIMIT_MS:
             middle = (low + high) // 2
@@ -350,10 +385,10 @@ class Analyzer:
             else:
                 runs.append(Run(key=key, label=label, first_ms=position, last_ms=position))
 
-        # A single unidentified probe between two probes of the same song is
-        # that song: a quiet passage, or a probe that happened to land somewhere
-        # the recogniser could not place. Punching a hole in the middle of a
-        # track would be worse than bridging it.
+        # An unidentified stretch between two runs of the same song is part of
+        # that song -- a quiet passage, or probes that landed somewhere the
+        # recogniser could not place. Punching a hole through the middle of a
+        # track is worse than bridging it, so long as the hole is short.
         merged: list[Run] = []
         for run in runs:
             if (
@@ -361,13 +396,30 @@ class Analyzer:
                 and run.key is not None
                 and merged[-1].key is None
                 and merged[-2].key == run.key
-                and merged[-1].first_ms == merged[-1].last_ms
+                and merged[-1].last_ms - merged[-1].first_ms <= MAX_BRIDGE_MS
             ):
                 merged.pop()
                 merged[-1].last_ms = run.last_ms
                 continue
             merged.append(run)
-        return merged
+
+        # A brief unidentified stretch between two different songs is the
+        # transition itself -- probes that straddled the change and matched
+        # neither side. Emitting that as a few seconds of "RockFM" between every
+        # pair of tracks is noise; let the two songs share a boundary instead.
+        # Anything longer than a scan step is a real break and is kept.
+        without_seams: list[Run] = []
+        for index, run in enumerate(merged):
+            straddles_a_change = (
+                run.key is None
+                and 0 < index < len(merged) - 1
+                and merged[index - 1].key is not None
+                and merged[index + 1].key is not None
+                and run.last_ms - run.first_ms <= STEP_MS
+            )
+            if not straddles_a_change:
+                without_seams.append(run)
+        return without_seams
 
     def _relearn(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         """Replace the reference with the whole aired span of this song."""
@@ -389,6 +441,16 @@ class Analyzer:
         if not runs:
             return window.end_ms
 
+        # Teach the index each song over the whole stretch it was heard across,
+        # before going looking for its edges. Bisection asks "is this still the
+        # same song?", and until now the only reference was the single twelve
+        # second probe that first identified it -- so the answer was no almost
+        # everywhere, and the boundary collapsed onto the last coarse probe.
+        # That is what pinned every song to a multiple of the scan step.
+        for run in runs:
+            if run.key is not None:
+                self._relearn(window, run, run.first_ms, run.last_ms + PROBE_MS)
+
         # One shared boundary per adjacent pair, so items are contiguous and
         # never overlap -- a radio stream has no gaps between one thing and the next.
         edges = [window.start_ms]
@@ -397,12 +459,45 @@ class Analyzer:
         edges.append(window.end_ms)
 
         committed = runs[:-1] if len(runs) > 1 else runs
-        for position, run in enumerate(committed):
-            self._commit_run(window, run, edges[position], edges[position + 1])
+        segments = [
+            (run, edges[position], edges[position + 1])
+            for position, run in enumerate(committed)
+        ]
+        for run, start_ms, end_ms in self._absorb_slivers(segments):
+            self._commit_run(window, run, start_ms, end_ms)
 
         if len(runs) > 1 and edges[-2] > window.start_ms:
             return edges[-2]
         return window.end_ms
+
+    @staticmethod
+    def _absorb_slivers(
+        segments: list[tuple[Run, int, int]],
+    ) -> list[tuple[Run, int, int]]:
+        """Fold anything too short to be a song into its neighbour.
+
+        A window is rewound to the boundary before its last run, and that
+        boundary is only accurate to a couple of seconds -- so the next window
+        opens on a two second tail of the song just committed. Emitted on its
+        own it became a sliver of "RockFM" wedged between every pair of tracks.
+        It belongs to whichever item it abuts, and the timeline stays gapless
+        either way.
+        """
+        cleaned: list[tuple[Run, int, int]] = []
+        carried_start: int | None = None
+        for index, (run, start_ms, end_ms) in enumerate(segments):
+            if carried_start is not None:
+                start_ms, carried_start = carried_start, None
+            if end_ms - start_ms < MIN_SONG_MS:
+                if index + 1 < len(segments):
+                    carried_start = start_ms  # hand the span to what follows
+                    continue
+                if cleaned:  # trailing sliver: give it to what came before
+                    previous_run, previous_start, _ = cleaned[-1]
+                    cleaned[-1] = (previous_run, previous_start, end_ms)
+                    continue
+            cleaned.append((run, start_ms, end_ms))
+        return cleaned
 
     def _commit_run(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
         if end_ms <= start_ms:

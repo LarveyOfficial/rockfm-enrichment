@@ -127,9 +127,9 @@ tr.sel td{background:#1f2733}
   <div class="panel">
     <h2>Appearance</h2>
     <p class="muted" style="margin:-4px 0 12px;font-size:.76rem">
-      What players show for things that are not songs. Leave a field blank to use
-      the built-in answer &mdash; the real programme name and artwork for presenter
-      talk, the station name for anything unrecognised.
+      What players show during advert breaks. Songs describe themselves, and
+      presenter talk already takes the real programme name and artwork from
+      RockFM's schedule. Leave a field blank for the built-in default.
     </p>
     <div id="appearance"><div class="empty">loading&hellip;</div></div>
   </div>

@@ -207,6 +207,7 @@ class Analyzer:
         # from boundary-refined edges, which is strictly better than the raw
         # probe extent -- so planning must not overwrite it with the worse one.
         self._settled: set[str] = set()
+        self._grounded: set[str] = set()
 
     # --- cursor ---
 
@@ -482,7 +483,19 @@ class Analyzer:
         a probe is added back. With a two second probe that correction is one
         second, where the twelve second probe this used to take made it six.
         """
-        low, high = earlier.last_ms, later.first_ms
+        # Run extents come from twelve second probes, which read as a song while
+        # most of the probe lies inside it -- so each extent is soft by up to
+        # half a probe, and the true change can sit outside the bracket they
+        # form. Searching only between them caps the answer at whichever extent
+        # overshot: a backward extension reaching half a probe into the outgoing
+        # song pulled every boundary that far early, shortening the song by five
+        # seconds however precise the bisection. The edge probes are two seconds
+        # long, so looking half a probe further out costs a step and no accuracy.
+        margin = PROBE_MS // 2
+        low = max(earlier.last_ms - margin, earlier.first_ms)
+        high = min(later.first_ms + margin, later.last_ms + PROBE_MS)
+        if high < low:
+            low, high = earlier.last_ms, later.first_ms
         correction = BISECT_PROBE_MS // 2
 
         if earlier.key is None and later.key is None:
@@ -538,6 +551,52 @@ class Analyzer:
 
         return merged
 
+    def _ground_reference(self, window: Window, run: Run) -> None:
+        """Teach the stretch already heard, before asking where it reaches.
+
+        Extension asks "is this still the same song?" every six seconds. That is
+        a question the local index answers in milliseconds -- but only about
+        audio it has a reference for, and at this point a freshly identified
+        song has nothing but the twelve second probe that named it. So every
+        step missed locally and fell through to the network: eight lookups per
+        song, per window, to establish an edge.
+
+        Learning the run's own extent first costs one pass over audio already in
+        memory and turns all eight into local answers. Once per song per window
+        is enough; the extension that follows only widens what is learned here,
+        and the commit relearns the refined span properly.
+        """
+        if run.key is None or run.label is None or run.key in self._grounded:
+            return
+        self._grounded.add(run.key)
+
+        track = self.index.get(run.label.track_id)
+        if track is None:
+            return
+        # A song carrying a reference learned from real boundaries already
+        # answers locally, and adding the coarse extent on top of it would only
+        # blur what the edge search depends on.
+        if track["song_anchored"] and track["learned_ms"]:
+            return
+
+        start_ms = run.first_ms
+        end_ms = min(run.last_ms + PROBE_MS, window.end_ms)
+        if end_ms <= start_ms:
+            return
+        span = window.probe8(start_ms, end_ms - start_ms)
+        if span.size == 0:
+            return
+
+        # Added, not swapped in. This is provisional coverage to make extension
+        # answerable locally -- it is not a claim about where the song begins or
+        # ends, so it must not mark the reference song-anchored or record itself
+        # as the learned span. Doing either would let this coarse extent stand
+        # in for the refined one the commit teaches, which is how a reference
+        # erodes: each pass learning from the last pass's approximation.
+        anchor_ms = int(track["anchor_ms"] or 0)
+        shift = int(round((start_ms - anchor_ms) / 1000 * fingerprint.FRAMES_PER_SECOND))
+        self.index.extend(run.label.track_id, fingerprint.compute(span), shift)
+
     def _extend_run(self, window: Window, run: Run) -> None:
         """Find where a run really reaches, not where the 24s grid landed.
 
@@ -548,10 +607,11 @@ class Analyzer:
         six second increments until identification stops costs a handful of
         probes -- local ones, once the song is known -- and removes the bias.
 
-        Both loops stop on a miss, so a miss is the expected outcome of the last
-        step, not a surprise worth a second opinion. Asking again at another
-        offset is how the scan protects a whole 24s stretch from one unlucky
-        probe; here it would only buy the same answer three times.
+        Both loops ask the local index and nothing else. The reference is
+        grounded first (see `_ground_reference`), so "is this still the same
+        song?" is answerable in milliseconds without leaving the process --
+        which is the only sensible way to ask it eight times per song, on every
+        probe of every window.
         """
         if run.key is None:
             return
@@ -561,8 +621,7 @@ class Analyzer:
             candidate = reach + EXTEND_STEP_MS
             if not window.covers(candidate):
                 break
-            found = self._identify(window, candidate, retry=False)
-            if found is None or found.key != run.key:
+            if not self._same_track(window, candidate, run.key):
                 break
             reach = candidate
         run.last_ms = reach
@@ -572,8 +631,7 @@ class Analyzer:
             candidate = start - EXTEND_STEP_MS
             if candidate < window.start_ms or not window.covers(candidate):
                 break
-            found = self._identify(window, candidate, retry=False)
-            if found is None or found.key != run.key:
+            if not self._same_track(window, candidate, run.key):
                 break
             start = candidate
         run.first_ms = start
@@ -631,6 +689,7 @@ class Analyzer:
         # the boundary collapsed onto the last coarse probe -- which is what
         # pinned every song to a multiple of the scan step.
         for run in runs:
+            self._ground_reference(window, run)
             self._extend_run(window, run)
 
         for position, run in enumerate(runs):
@@ -704,6 +763,7 @@ class Analyzer:
         probes: list[tuple[int, Label | None]] = []
         self._learned.clear()
         self._settled.clear()
+        self._grounded.clear()
         total = self._probe_count(window)
         emitted_to = window.start_ms
         position = window.start_ms

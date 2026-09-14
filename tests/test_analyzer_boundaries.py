@@ -61,8 +61,13 @@ def song_at(spans, ms):
 def run_analyzer(tmp_path, spans, passes=4):
     analyzer = build(tmp_path)
 
+    # A probe is twelve seconds long, so it reads as whatever song holds most
+    # of it -- the same model `same_track` and `edge_match` use below. Treating
+    # identification as though it resolved the instant at `at_ms` let the scan
+    # appear to find edges a probe-width sharper than it can, which is a
+    # property of the stub and not of the code under test.
     def identify(_window, at_ms, **_kw):
-        name = song_at(spans, at_ms)
+        name = song_at(spans, at_ms + PROBE_MS // 2)
         if name is None:
             return None
         return Label(key=name, artist="x", title=name, source="stub",
@@ -380,11 +385,10 @@ def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
     from rockfm.analyzer import EXTEND_STEP_MS, Run
 
     analyzer = build(tmp_path)
-    analyzer._identify = lambda _w, at, **_kw: (
-        Label(key=song_at(played, at), artist="x", title="t", source="s",
-              confidence=1.0, track_id=1)
-        if song_at(played, at) else None
-    )
+    # Extension asks the index, not the network: the reference is grounded from
+    # the run's own extent before the walk begins.
+    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at) == key
+    analyzer._ground_reference = lambda _w, _r: None
     samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
     window = Window(0, MIN_WINDOW_MS, samples)
 
@@ -401,12 +405,10 @@ def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
 
 
 def test_a_miss_is_only_second_guessed_where_it_costs_something(tmp_path):
-    """Retrying a miss protects the scan; during extension it buys nothing.
+    """Retrying a miss protects the scan, where one bad probe writes off 24s.
 
-    Both extension loops stop on a miss, so the last step of every extension is
-    a miss by design. Asking again at another offset there pays for the same
-    answer three times over -- per song, per edge, against a rate-limited
-    service -- to learn what the first answer already said.
+    Elsewhere it just buys the same answer three times, so callers that expect
+    a miss can opt out.
     """
     analyzer = build(tmp_path)
     analyzer._local = lambda _w, at, min_score=0.0: None
@@ -430,12 +432,18 @@ def test_a_miss_is_only_second_guessed_where_it_costs_something(tmp_path):
     assert len(calls) == 1
 
 
-def test_extension_does_not_pay_for_the_miss_that_stops_it(tmp_path, played):
+def test_extension_never_reaches_for_the_network(tmp_path):
+    """Finding a song's edge must not cost a single external lookup.
+
+    Extension steps out every six seconds, in both directions, for every run,
+    on every probe of every window. Answered locally that is free. Answered
+    over the network it was eight lookups per song just to locate an edge --
+    which, with a freshly identified song having only its twelve second probe
+    as a reference, is exactly what it had become.
+    """
     from rockfm.analyzer import Run
 
     analyzer = build(tmp_path)
-    analyzer._local = lambda _w, at, min_score=0.0: None
-
     calls: list[int] = []
 
     def external(_window, at_ms):
@@ -443,6 +451,8 @@ def test_extension_does_not_pay_for_the_miss_that_stops_it(tmp_path, played):
         return None
 
     analyzer._external = external
+    analyzer._ground_reference = lambda _w, _r: None
+    analyzer._same_track = lambda _w, at, key, s=0.0: at <= 150_000
     samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
     window = Window(0, MIN_WINDOW_MS, samples)
 
@@ -451,5 +461,5 @@ def test_extension_does_not_pay_for_the_miss_that_stops_it(tmp_path, played):
                       confidence=1.0, track_id=1)
     analyzer._extend_run(window, run)
 
-    # One lookup forwards, one backwards -- not three of each.
-    assert len(calls) == 2
+    assert run.last_ms > 120_000, "the run never reached out"
+    assert calls == []

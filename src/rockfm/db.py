@@ -253,6 +253,25 @@ def record_gap(
     )
 
 
+def gaps_overlapping(
+    conn: sqlite3.Connection, start_ms: int, end_ms: int
+) -> list[sqlite3.Row]:
+    """Every gap touching the span, including one that began before it.
+
+    `gaps_between` asks where a gap *starts*, which is what the dashboard
+    wants. A caller asking "is any of this stretch missing?" needs the gap that
+    began earlier and is still running -- fourteen minutes of missing audio
+    starts once and overlaps every window that follows until it ends.
+    """
+    return list(
+        conn.execute(
+            "SELECT * FROM gaps WHERE before_pdt_ms > ? AND before_pdt_ms - missing_ms < ?"
+            " ORDER BY before_pdt_ms ASC",
+            (start_ms, end_ms),
+        )
+    )
+
+
 def gaps_between(
     conn: sqlite3.Connection, start_ms: int, end_ms: int
 ) -> list[sqlite3.Row]:

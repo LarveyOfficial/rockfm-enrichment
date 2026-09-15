@@ -163,7 +163,9 @@ def test_audio_after_a_hole_keeps_its_own_timestamps(tmp_path, monkeypatch):
     _decode_as(monkeypatch, lambda pdt: 1.0 if pdt < 60_000 else 2.0)
 
     span = reader.read(0, 72_000, rate=rate)
-    at = lambda ms: span[int(ms * rate / 1000)]
+
+    def at(ms):
+        return span[int(ms * rate / 1000)]
 
     assert at(0) == 1.0 and at(11_000) == 1.0, "the first run moved"
     assert at(30_000) == 0.0, "the hole was closed up instead of left silent"

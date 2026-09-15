@@ -211,6 +211,11 @@ class Analyzer:
         self._held = False
         # What this window has written, as (key, start, end), in order.
         self._written: list[tuple[str | None, int, int]] = []
+        # Spans the recorder never got, as (start, end). Audio is not missing
+        # from the buffer there -- the reader fills it with silence so that
+        # everything around it keeps its own wall clock -- but there is nothing
+        # to identify, and nothing that happened there can be claimed by a song.
+        self._holes: list[tuple[int, int]] = []
 
     # --- cursor ---
 
@@ -565,6 +570,30 @@ class Analyzer:
 
         return merged
 
+    def _inside_a_hole(self, start_ms: int, end_ms: int) -> bool:
+        """Does this stretch touch audio that was never recorded?"""
+        return any(
+            start_ms < hole_end and end_ms > hole_start
+            for hole_start, hole_end in self._holes
+        )
+
+    def _outside_holes(self, start_ms: int, end_ms: int) -> tuple[int, int]:
+        """Trim a span back to where the recording actually exists.
+
+        A song cannot have played through audio nobody recorded. Its start may
+        still reach back, and its end may still stretch forward, but neither
+        may cross a hole -- the station kept broadcasting, we simply were not
+        listening, and claiming otherwise puts songs inside a gap.
+        """
+        for hole_start, hole_end in self._holes:
+            if end_ms <= hole_start or start_ms >= hole_end:
+                continue
+            if start_ms < hole_start:
+                end_ms = min(end_ms, hole_start)
+            else:
+                start_ms = max(start_ms, hole_end)
+        return start_ms, end_ms
+
     def _run_start(self, run: Run, window: Window) -> int:
         """Where the song began, by the largest group of probes that agree.
 
@@ -643,6 +672,7 @@ class Analyzer:
             # track, reached back over Sweet Home Alabama, and cut it short.
             start_ms = max(self._run_start(run, window), floor_ms)
             end_ms = self._run_end(run, start_ms, window)
+            start_ms, end_ms = self._outside_holes(start_ms, end_ms)
             if end_ms > start_ms:
                 songs.append([run, start_ms, end_ms])
             floor_ms = run.last_ms + PROBE_MS // 2
@@ -698,6 +728,15 @@ class Analyzer:
         probes: list[tuple[int, Label | None]] = []
         self._held = False
         self._written = []
+        self._holes = [
+            (row["before_pdt_ms"] - row["missing_ms"], row["before_pdt_ms"])
+            for row in db.gaps_overlapping(self.conn, window.start_ms, window.end_ms)
+        ]
+        if self._holes:
+            log.info(
+                "%d stretch(es) of this window were never recorded; leaving them alone",
+                len(self._holes),
+            )
         total = self._probe_count(window)
         emitted_to = window.start_ms
         position = window.start_ms
@@ -712,7 +751,10 @@ class Analyzer:
                 )
                 self._held = True
                 break
-            probes.append((position, self._identify(window, position)))
+            if self._inside_a_hole(position, position + PROBE_MS):
+                probes.append((position, None))
+            else:
+                probes.append((position, self._identify(window, position)))
             done += 1
             position += STEP_MS
             self._note("scanning", done, total)

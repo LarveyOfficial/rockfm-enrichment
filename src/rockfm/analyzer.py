@@ -313,6 +313,28 @@ class Analyzer:
         value = row["duration_ms"] if row else None
         return int(value) if value else None
 
+    def _release_ms(self, label: Label | None) -> int | None:
+        """How long the release runs, asked before the edges are drawn.
+
+        Enrichment used to happen at commit, which is after the end has already
+        been decided -- so a song's first airing had no length to reason with
+        and its end fell back to the last probe that heard it, up to a scan step
+        short. That is the same shortfall the old design kept producing, wearing
+        different clothes. The lookup is cached and was going to happen anyway;
+        it just has to happen first.
+        """
+        if label is None or not (label.artist and label.title):
+            return None
+        stored = self._expected_ms(catalog_key(label.artist, label.title))
+        if stored:
+            return stored
+        try:
+            found = self.enricher.lookup(label.artist, label.title)
+        except Exception as exc:          # a length is a nicety, never a blocker
+            log.debug("no release length for %s: %s", label.title, exc)
+            return None
+        return getattr(found, "duration_ms", None) or None
+
     def _commit(self, item: Item) -> None:
         if self._extends_previous(item):
             return
@@ -561,11 +583,7 @@ class Analyzer:
         is measured, not predicted.
         """
         heard_to = min(run.last_ms + PROBE_MS, window.end_ms)
-        expected = (
-            self._expected_ms(catalog_key(run.label.artist, run.label.title))
-            if run.label
-            else None
-        )
+        expected = self._release_ms(run.label)
         if expected:
             return min(max(start_ms + expected, heard_to), window.end_ms)
         return heard_to
@@ -817,7 +835,7 @@ class Analyzer:
 
         assert run.label is not None
         confidence = run.label.confidence
-        expected = self._expected_ms(run.key) if run.key else None
+        expected = self._release_ms(run.label)
         if expected:
             drift = abs((end_ms - start_ms) - expected) / expected
             if drift > DURATION_DISAGREEMENT:

@@ -315,3 +315,66 @@ def test_nothing_imports_a_fingerprint_index() -> None:
     for name in ("rockfm.fingerprint", "rockfm.seed", "rockfm.classify.segmenter"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(name)
+
+
+# --- reaching back into a gap, and forward out of one ----------------------
+
+
+class _Sleeve:
+    """An enricher that knows how long releases run."""
+
+    def __init__(self, **lengths):
+        self.lengths = lengths
+        self.asked: list[str] = []
+
+    def lookup(self, artist, title):
+        self.asked.append(title)
+        ms = self.lengths.get(title)
+        return type("E", (), {"duration_ms": ms})()
+
+
+def test_a_start_reaches_back_into_the_gap_before_it(tmp_path):
+    """The first probe to name a song is rarely the song's first second.
+
+    If the probe lands ten seconds in, the song began ten seconds ago -- inside
+    what would otherwise be filed as a gap. Nothing else can recover that: the
+    probe before it heard the song and could not name it.
+    """
+    analyzer = build(tmp_path)
+    analyzer.enricher = _Sleeve(**{"one": 200_000})
+
+    # First probe at 120s, but the recogniser says we are 10s in.
+    plan = plan_for(analyzer, [("a", "A", "one", 110_000, 120_000, 192_000)])
+    placed = {run.key: (start, end) for run, start, end in plan}
+
+    assert placed["a"][0] == 110_000, "the start did not reach back into the gap"
+    gap_before = [span for key, span in placed.items() if key is None]
+    assert gap_before and gap_before[0][1] == 110_000, "the gap did not give way"
+
+
+def test_a_first_airing_still_ends_at_its_release_length(tmp_path):
+    """Enrichment used to run at commit, after the end was already decided.
+
+    So a song's first airing had no length to reason with and stopped at the
+    last probe that heard it -- up to a scan step short, which is the shortfall
+    this project kept rediscovering.
+    """
+    sleeve = _Sleeve(**{"one": 200_000})
+    analyzer = build(tmp_path)
+    analyzer.enricher = sleeve
+
+    # Nothing in song_meta: this is the first time the song has ever aired.
+    plan = plan_for(analyzer, [("a", "A", "one", 0, 24_000, 96_000)])
+    placed = {run.key: (start, end) for run, start, end in plan}
+
+    assert sleeve.asked, "the release length was never looked up"
+    assert placed["a"][1] == 200_000, "the end fell back to the last probe"
+
+
+def test_a_missing_release_length_is_not_fatal(tmp_path):
+    analyzer = build(tmp_path)
+    analyzer.enricher = _Sleeve()          # knows nothing
+
+    plan = plan_for(analyzer, [("a", "A", "one", 0, 24_000, 96_000)])
+    placed = {run.key: (start, end) for run, start, end in plan}
+    assert placed["a"][1] == 96_000 + PROBE_MS

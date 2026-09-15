@@ -420,3 +420,50 @@ def test_pacing_is_never_set_below_the_rate_shazam_tolerates(tmp_path):
     settings.save(analyzer.conn, {"recognizer_interval_seconds": 10.0})
     analyzer._pace_recognizer()
     assert analyzer.recognizer.min_interval == 10.0, "slowing down must still work"
+
+
+# --- a clip is not a song ----------------------------------------------------
+
+
+def test_a_single_probe_is_not_enough_to_call_it_a_song(tmp_path):
+    """RockFM drops two seconds of a track in as a sting, and one probe hears it."""
+    analyzer = build(tmp_path)
+    plan = plan_for(analyzer, [
+        ("alabama", "Lynyrd Skynyrd", "Sweet Home Alabama", 0, 24_000, 240_000),
+        ("clip", "Primal Scream", "Rocks", 264_000 - 50_000, 264_000, 264_000),
+        ("simple", "Simple Minds", "Don't You", 276_000, 288_000, 360_000),
+    ])
+    assert "clip" not in {run.key for run, _s, _e in plan}
+
+
+def test_a_start_never_reaches_back_over_another_song(tmp_path):
+    """A clip from a minute into a track reports a start a minute ago.
+
+    That minute was positively identified as something else. Reaching into it
+    is what cut Sweet Home Alabama short to make room for Primal Scream.
+    """
+    analyzer = build(tmp_path)
+    plan = plan_for(analyzer, [
+        ("alabama", "Lynyrd Skynyrd", "Sweet Home Alabama", 0, 24_000, 240_000),
+        # Two probes, so it counts -- but told it began inside Alabama.
+        ("rocks", "Primal Scream", "Rocks", 200_000, 264_000, 288_000),
+    ])
+    placed = {run.key: (start, end) for run, start, end in plan}
+    assert placed["rocks"][0] >= 240_000, "the start reached back over Alabama"
+    assert placed["alabama"][1] >= 240_000, "Alabama was cut short for it"
+
+
+def test_bridging_a_song_keeps_everything_its_probes_said(tmp_path):
+    """Two halves of one airing joined across a short miss are one run."""
+    from rockfm.analyzer import Analyzer
+
+    probes = [
+        (0, label("k", 1_000)), (24_000, label("k", 1_000)),
+        (48_000, None),
+        (72_000, label("k", 1_000)), (96_000, label("k", 1_000)),
+    ]
+    runs = Analyzer._group(probes)
+    named = [run for run in runs if run.key == "k"]
+    assert len(named) == 1
+    assert named[0].heard == 4
+    assert len(named[0].starts) == 4

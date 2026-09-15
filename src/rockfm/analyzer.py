@@ -71,6 +71,8 @@ STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
 RETRY_OFFSETS_MS = (5_000, 10_000)
 # Told starts within this of each other are the same answer.
 START_AGREEMENT_MS = 2_000
+# Probes that must name a recording before it counts as having played.
+MIN_PROBES_FOR_A_SONG = 2
 # How far a run may stray from the release length before we distrust it.
 DURATION_DISAGREEMENT = 0.35
 MIN_SONG_MS = 45_000       # floor for songs of unknown length
@@ -148,12 +150,10 @@ class Run:
     label: Label | None
     first_ms: int
     last_ms: int
-    # Why extension stopped at each edge. Recorded because the difference
-    # between "the song ended" and "we ran out of ways to ask" is invisible in
-    # the finished timeline, and that is exactly what goes wrong.
-    # Every probe in the run independently reports where the song began. They
-    # agree to milliseconds, so the median of them is the start.
+    # Every probe in the run independently reports where the song began.
     starts: list[int] = field(default_factory=list)
+    # How many probes named it. One is not enough to call it a song.
+    heard: int = 0
 
 
 class Window:
@@ -538,8 +538,10 @@ class Analyzer:
                 runs[-1].last_ms = position
             else:
                 runs.append(Run(key=key, label=label, first_ms=position, last_ms=position))
-            if label is not None and label.started_ms is not None:
-                runs[-1].starts.append(label.started_ms)
+            if label is not None:
+                runs[-1].heard += 1
+                if label.started_ms is not None:
+                    runs[-1].starts.append(label.started_ms)
 
         # An unidentified stretch between two runs of the same song is part of
         # that song -- a quiet passage, or probes that landed somewhere the
@@ -556,6 +558,8 @@ class Analyzer:
             ):
                 merged.pop()
                 merged[-1].last_ms = run.last_ms
+                merged[-1].starts.extend(run.starts)
+                merged[-1].heard += run.heard
                 continue
             merged.append(run)
 
@@ -623,13 +627,25 @@ class Analyzer:
             return []
 
         songs: list[list] = []
+        floor_ms = window.start_ms
         for run in runs:
             if run.key is None or run.label is None:
                 continue
-            start_ms = self._run_start(run, window)
+            if run.heard < MIN_PROBES_FOR_A_SONG:
+                # One 12s probe can match two seconds of a track the station
+                # dropped in as a sting. A second probe, 24s on, naming the same
+                # recording is what says it actually played. The stretch is left
+                # to whatever surrounds it.
+                continue
+            # A start may reach back into audio nobody could name, but never
+            # over audio a probe positively named as a different song. Primal
+            # Scream's two-second clip reported an offset a minute into the
+            # track, reached back over Sweet Home Alabama, and cut it short.
+            start_ms = max(self._run_start(run, window), floor_ms)
             end_ms = self._run_end(run, start_ms, window)
             if end_ms > start_ms:
                 songs.append([run, start_ms, end_ms])
+            floor_ms = run.last_ms + PROBE_MS // 2
 
         songs.sort(key=lambda item: item[1])
         nonmusic_ms = int(settings.load(self.conn)["min_nonmusic_seconds"] * 1000)

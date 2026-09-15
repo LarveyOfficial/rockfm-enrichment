@@ -507,23 +507,38 @@ def create_app(config: Config | None = None) -> FastAPI:
         return JSONResponse({"current": saved}, headers={"Access-Control-Allow-Origin": "*"})
 
     @app.post("/api/reanalyze")
-    def reanalyze() -> JSONResponse:
-        """Send the analyzer back over the audio still in the buffer.
+    def reanalyze(minutes: float | None = None) -> JSONResponse:
+        """Send the analyzer back over audio it has already scanned.
 
-        Its cursor only moves forward, so a fix to how audio is interpreted
-        never reaches anything already scanned. Clearing the cursor re-runs the
-        Every stretch is identified again from the recogniser, which is the
-        only thing that identifies anything now, so a second pass costs what the
-        first did.
+        Its cursor only moves forward, so a fix to how audio is read never
+        reaches anything already scanned. With no argument the whole buffer is
+        re-read. With `minutes`, only the tail is -- and that is usually what is
+        wanted: when one stretch was read wrong, redoing twenty minutes beats
+        redoing six hours at four seconds a lookup.
+
+        Rewinding also clears what was written for that stretch, because it was
+        written from a reading of it now known to be wrong.
         """
-        state.conn.execute(
-            "DELETE FROM meta WHERE key = ?", (db.ANALYZER_CURSOR_KEY,)
-        )
         earliest = db.earliest_segment(state.conn)
+        latest = db.latest_segment(state.conn)
+        if minutes is None or earliest is None or latest is None:
+            state.conn.execute(
+                "DELETE FROM meta WHERE key = ?", (db.ANALYZER_CURSOR_KEY,)
+            )
+            from_ms = earliest["pdt_ms"] if earliest else None
+        else:
+            from_ms = max(
+                earliest["pdt_ms"], int(latest["pdt_ms"] - minutes * 60_000)
+            )
+            db.clear_timeline_span(
+                state.conn, from_ms, latest["pdt_ms"] + latest["duration_ms"] + 1
+            )
+            db.set_meta(state.conn, db.ANALYZER_CURSOR_KEY, str(from_ms))
+        log.info("re-analysing from %s", _iso(from_ms) if from_ms else "the start")
         return JSONResponse(
             {
                 "restarted": True,
-                "from": _iso(earliest["pdt_ms"]) if earliest else None,
+                "from": _iso(from_ms) if from_ms else None,
                 "buffered_seconds": state.status()["buffer"]["seconds"],
             },
             headers={"Access-Control-Allow-Origin": "*"},

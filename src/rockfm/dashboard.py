@@ -121,6 +121,9 @@ tr.sel td{background:#1f2733}
       <button data-h="24">24 h</button>
       <span style="flex:1"></span>
       <button id="reanalyze" title="Re-run the analyzer over everything still buffered.">re-analyze buffer</button>
+      <input id="redo-min" type="number" min="1" step="1" value="30" style="width:60px"
+             title="How many minutes back to go">
+      <button id="redo" title="Re-read just the last few minutes. Use when one stretch came out wrong, rather than redoing the whole buffer.">redo last minutes</button>
       <button id="stop" disabled>stop audio</button>
     </div>
     <div class="track" id="track"><div class="head" id="head"></div></div>
@@ -549,6 +552,21 @@ el('auto').onclick = () => {
   el('auto').classList.toggle('on', auto);
 };
 el('stop').onclick = stopAudio;
+el('redo').onclick = async () => {
+  const btn = el('redo');
+  const minutes = Number(el('redo-min').value) || 30;
+  btn.disabled = true;
+  const previous = btn.textContent;
+  try {
+    const res = await fetch('/api/reanalyze?minutes=' + minutes, {method: 'POST'});
+    const body = res.ok ? await res.json() : null;
+    btn.textContent = body ? 'redoing from ' + (body.from || '?') : 'failed';
+  } catch (err) {
+    btn.textContent = 'failed';
+  }
+  setTimeout(() => { btn.textContent = previous; btn.disabled = false; }, 5000);
+  load();
+};
 el('reanalyze').onclick = async () => {
   const btn = el('reanalyze');
   btn.disabled = true;

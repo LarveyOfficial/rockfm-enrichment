@@ -197,3 +197,60 @@ def test_reanalyze_rewinds_the_analyzer(env):
 
     # The cursor is gone, so the next pass starts from the buffer again.
     assert db.get_meta(conn, db.ANALYZER_CURSOR_KEY) is None
+
+
+# --- redoing one stretch rather than the whole buffer ------------------------
+
+
+def _timeline_row(conn, start_ms, end_ms, title):
+    db.upsert_timeline(
+        conn,
+        {"start_ms": start_ms, "end_ms": end_ms, "kind": "cancion",
+         "title": title, "artist": "someone"},
+        0,
+    )
+    conn.commit()
+
+
+def test_rewinding_a_few_minutes_leaves_the_rest_alone(env):
+    """A recording gap once shifted every song after it by fourteen minutes.
+
+    Nineteen minutes of the timeline were wrong and six hours were right, and
+    the only control available redid all of it at four seconds a lookup.
+    """
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 3_600_000, 600)          # an hour of audio
+    latest = db.latest_segment(conn)["pdt_ms"]
+    _timeline_row(conn, latest - 3_000_000, latest - 2_900_000, "Kept")
+    _timeline_row(conn, latest - 600_000, latest - 500_000, "Redone")
+
+    body = client.post("/api/reanalyze?minutes=20").json()
+    assert body["restarted"] is True
+
+    cursor = int(db.get_meta(conn, db.ANALYZER_CURSOR_KEY))
+    assert cursor == pytest.approx(latest - 1_200_000, abs=1000)
+
+    titles = {row["title"] for row in conn.execute("SELECT title FROM timeline")}
+    assert "Kept" in titles, "an untouched stretch of the timeline was cleared"
+    assert "Redone" not in titles, "the stretch being redone was left in place"
+
+
+def test_rewinding_further_than_the_buffer_stops_at_its_start(env):
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 600_000, 100)
+    earliest = db.earliest_segment(conn)["pdt_ms"]
+
+    client.post("/api/reanalyze?minutes=600")
+    assert int(db.get_meta(conn, db.ANALYZER_CURSOR_KEY)) == earliest
+
+
+def test_rewinding_with_no_argument_still_redoes_everything(env):
+    _, conn, client = env
+    now = int(time.time() * 1000)
+    record(conn, now - 600_000, 100)
+    db.set_meta(conn, db.ANALYZER_CURSOR_KEY, str(now))
+
+    client.post("/api/reanalyze")
+    assert db.get_meta(conn, db.ANALYZER_CURSOR_KEY) is None

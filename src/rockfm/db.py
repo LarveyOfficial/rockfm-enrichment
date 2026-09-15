@@ -372,6 +372,23 @@ def get_song_meta(conn: sqlite3.Connection, key: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM song_meta WHERE key = ?", (key,)).fetchone()
 
 
+def clear_timeline_span(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> None:
+    """Remove what was written from `start_ms` up to `end_ms`, to write it again.
+
+    Items that began inside the span go. An item that began earlier but was
+    stretched into it -- a seam closed across the window edge -- is trimmed
+    back to where the span begins, so rewriting cannot leave it overlapping.
+    """
+    with transaction(conn):
+        conn.execute(
+            "DELETE FROM timeline WHERE start_ms >= ? AND start_ms < ?", (start_ms, end_ms)
+        )
+        conn.execute(
+            "UPDATE timeline SET end_ms = ? WHERE start_ms < ? AND end_ms > ?",
+            (start_ms, start_ms, start_ms),
+        )
+
+
 def previous_timeline(conn: sqlite3.Connection, before_ms: int) -> sqlite3.Row | None:
     """The item ending closest before `before_ms`."""
     return conn.execute(

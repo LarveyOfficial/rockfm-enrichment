@@ -1,0 +1,287 @@
+{
+ "about": "Shazam's answers for the first 20 minutes of RockFM recorded 2026-09-15 from 05:22 Madrid, keyed by milliseconds into the recording: every base probe on the 24s grid, plus the +5s/+10s retries the analyzer makes after a miss. Recorded at 4s pacing with no refusals.",
+ "answers": {
+  "0": {
+   "artist": "Oasis",
+   "key": "5226965",
+   "offset": 210.829875,
+   "title": "Don't Look Back In Anger"
+  },
+  "1008000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 118.552960937,
+   "title": "Nothing Else Matters"
+  },
+  "101000": null,
+  "1032000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 180.69765625,
+   "title": "Nothing Else Matters"
+  },
+  "1056000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 146.41815625,
+   "title": "Nothing Else Matters"
+  },
+  "106000": null,
+  "1080000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 228.6994375,
+   "title": "Nothing Else Matters"
+  },
+  "1104000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 194.414375,
+   "title": "Nothing Else Matters"
+  },
+  "1128000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 276.69925,
+   "title": "Nothing Else Matters"
+  },
+  "1152000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 300.696,
+   "title": "Nothing Else Matters"
+  },
+  "1176000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 266.412375,
+   "title": "Nothing Else Matters"
+  },
+  "120000": {
+   "artist": "Elastica",
+   "key": "223672",
+   "offset": 10.73317871,
+   "title": "Connection"
+  },
+  "1200000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 348.7028125,
+   "title": "Nothing Else Matters"
+  },
+  "1224000": null,
+  "1229000": null,
+  "1234000": null,
+  "1248000": null,
+  "1253000": null,
+  "1258000": null,
+  "1272000": null,
+  "1277000": null,
+  "1282000": null,
+  "1296000": null,
+  "1301000": null,
+  "1306000": null,
+  "144000": null,
+  "149000": {
+   "artist": "Data & Sacha Sieff",
+   "key": "333842727",
+   "offset": 38.723273437,
+   "title": "Me\u0301lodie"
+  },
+  "168000": {
+   "artist": "Kashido & Artlist Classics",
+   "key": "677826422",
+   "offset": 5.790072265,
+   "title": "Ode to Joy"
+  },
+  "192000": null,
+  "197000": null,
+  "202000": null,
+  "216000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 1.5401240230000002,
+   "title": "Gimme All Your Lovin'"
+  },
+  "24000": {
+   "artist": "Oasis",
+   "key": "5226965",
+   "offset": 234.82890625,
+   "title": "Don't Look Back In Anger"
+  },
+  "240000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 25.469974609,
+   "title": "Gimme All Your Lovin'"
+  },
+  "264000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 49.533902343,
+   "title": "Gimme All Your Lovin'"
+  },
+  "288000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 73.469453125,
+   "title": "Gimme All Your Lovin'"
+  },
+  "312000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 165.54753125,
+   "title": "Gimme All Your Lovin'"
+  },
+  "336000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 189.5635,
+   "title": "Gimme All Your Lovin'"
+  },
+  "360000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 181.48896875,
+   "title": "Gimme All Your Lovin'"
+  },
+  "384000": {
+   "artist": "ZZ Top",
+   "key": "11267312",
+   "offset": 195.439,
+   "title": "Gimme All Your Lovin'"
+  },
+  "408000": null,
+  "413000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": -5.219152342999999,
+   "title": "You Really Got Me"
+  },
+  "432000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 13.303660156,
+   "title": "You Really Got Me"
+  },
+  "456000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 37.269027343000005,
+   "title": "You Really Got Me"
+  },
+  "48000": {
+   "artist": "Oasis",
+   "key": "5226965",
+   "offset": 258.82815625,
+   "title": "Don't Look Back In Anger"
+  },
+  "480000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 61.244917968,
+   "title": "You Really Got Me"
+  },
+  "504000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 85.401515625,
+   "title": "You Really Got Me"
+  },
+  "528000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 109.18827343699999,
+   "title": "You Really Got Me"
+  },
+  "552000": {
+   "artist": "Van Halen",
+   "key": "301498",
+   "offset": 133.16634375,
+   "title": "You Really Got Me"
+  },
+  "576000": {
+   "artist": "Gamma Rock",
+   "key": "306938664",
+   "offset": -2.4174846189999997,
+   "title": "Destroyer"
+  },
+  "600000": null,
+  "605000": null,
+  "610000": null,
+  "624000": null,
+  "629000": null,
+  "634000": null,
+  "648000": null,
+  "653000": null,
+  "658000": null,
+  "672000": null,
+  "677000": null,
+  "682000": null,
+  "696000": null,
+  "701000": null,
+  "706000": null,
+  "72000": null,
+  "720000": null,
+  "725000": null,
+  "730000": null,
+  "744000": null,
+  "749000": null,
+  "754000": null,
+  "768000": null,
+  "77000": null,
+  "773000": null,
+  "778000": null,
+  "792000": null,
+  "797000": null,
+  "802000": null,
+  "816000": null,
+  "82000": null,
+  "821000": null,
+  "826000": null,
+  "840000": null,
+  "845000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": -6.312568847,
+   "title": "Nothing Else Matters"
+  },
+  "864000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 12.696204101,
+   "title": "Nothing Else Matters"
+  },
+  "888000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 36.69653906200001,
+   "title": "Nothing Else Matters"
+  },
+  "912000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 22.557435546,
+   "title": "Nothing Else Matters"
+  },
+  "936000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 84.6963125,
+   "title": "Nothing Else Matters"
+  },
+  "96000": null,
+  "960000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 70.554328125,
+   "title": "Nothing Else Matters"
+  },
+  "984000": {
+   "artist": "Metallica",
+   "key": "10314013",
+   "offset": 132.69684375,
+   "title": "Nothing Else Matters"
+  }
+ }
+}

@@ -69,6 +69,8 @@ STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
 # Where to look again when a probe comes back empty, before concluding there is
 # no song there.
 RETRY_OFFSETS_MS = (5_000, 10_000)
+# Told starts within this of each other are the same answer.
+START_AGREEMENT_MS = 2_000
 # How far a run may stray from the release length before we distrust it.
 DURATION_DISAGREEMENT = 0.35
 MIN_SONG_MS = 45_000       # floor for songs of unknown length
@@ -207,6 +209,8 @@ class Analyzer:
         # Set when a window ends with audio nobody could identify because the
         # recogniser was down. The cursor stops there rather than past it.
         self._held = False
+        # What this window has written, as (key, start, end), in order.
+        self._written: list[tuple[str | None, int, int]] = []
 
     # --- cursor ---
 
@@ -558,13 +562,33 @@ class Analyzer:
         return merged
 
     def _run_start(self, run: Run, window: Window) -> int:
-        """Where the song began, as its own probes reported it."""
+        """Where the song began, by the largest group of probes that agree.
+
+        Probes do not always agree. A station's edit that drops a verse moves
+        every later offset, and a recording issued twice with different intros
+        matches either one: across one airing of "Nothing Else Matters" ten
+        probes said 851.3s and six said 889.4s or 909.6s. A median over all of
+        them drifts as probes arrive, which moved a boundary after it had been
+        written. The largest cluster that agrees to within two seconds does
+        not; ties go to the earlier start.
+
+        A start may also sit inside the first probe that named the song. A probe
+        straddling the change hears the song begin partway through and reports
+        a negative offset -- You Really Got Me began 5.2s into its first probe.
+        That is a measurement, not a wild answer, and it used to be discarded.
+        """
         told = sorted(value for value in run.starts if value is not None)
         if told:
-            start = told[len(told) // 2]
-            # It has to sit at or before the probe that heard it and inside the
-            # window. A wild answer is not worth trusting over the probe grid.
-            if window.start_ms <= start <= run.first_ms:
+            clusters: list[list[int]] = []
+            for value in told:
+                if clusters and value - clusters[-1][0] <= START_AGREEMENT_MS:
+                    clusters[-1].append(value)
+                else:
+                    clusters.append([value])
+            best = max(clusters, key=lambda group: (len(group), -group[0]))
+            start = best[len(best) // 2]
+            latest_plausible = run.first_ms + max(RETRY_OFFSETS_MS) + PROBE_MS
+            if window.start_ms <= start <= latest_plausible:
                 return start
         return max(run.first_ms, window.start_ms)
 
@@ -657,6 +681,7 @@ class Analyzer:
         self._publish_recognizer_state()
         probes: list[tuple[int, Label | None]] = []
         self._held = False
+        self._written = []
         total = self._probe_count(window)
         emitted_to = window.start_ms
         position = window.start_ms
@@ -704,18 +729,21 @@ class Analyzer:
         emitted_to: int,
         settled_before: int | None,
     ) -> int:
-        """Commit every planned item that is finished and not already written.
+        """Write every finished item, rewriting any whose boundary has moved.
 
-        Except anything unnamed while the recogniser is down. A stretch nobody
-        could identify looks exactly like a stretch with no song in it, and the
-        difference is the whole meaning of the item: one is the programme, the
-        other is a song we failed to ask about. Committing the first when it was
-        really the second writes the failure into the timeline as fact, and the
-        cursor moves past it, so it is never revisited.
+        Planning repeats as probes arrive, and a later plan can move a boundary
+        that was already written -- a song's start reaching back once enough of
+        its probes agree. This used to skip anything starting before what had
+        been written, so the moved item was never written at all: three minutes
+        of Gimme All Your Lovin' and four of talk simply were not on the
+        timeline. When what is settled no longer matches what was written, the
+        window's settled span is cleared and laid down again.
+
+        Nothing unnamed is written while the recogniser is down. A stretch
+        nobody could identify looks exactly like one with no song in it.
         """
+        ready: list[tuple[Run, int, int]] = []
         for run, start_ms, end_ms in self._plan(window, probes):
-            if start_ms < emitted_to:
-                continue
             if settled_before is not None and end_ms > settled_before:
                 break
             if run.key is None and self._recognizer_degraded():
@@ -726,9 +754,20 @@ class Analyzer:
                     )
                 self._held = True
                 break
+            ready.append((run, start_ms, end_ms))
+        if not ready:
+            return emitted_to
+
+        shape = [(run.key, start_ms, end_ms) for run, start_ms, end_ms in ready]
+        if shape[: len(self._written)] != self._written:
+            db.clear_timeline_span(
+                self.conn, window.start_ms, max(emitted_to, ready[-1][2])
+            )
+            self._written = []
+        for run, start_ms, end_ms in ready[len(self._written):]:
             self._commit_run(window, run, start_ms, end_ms)
-            emitted_to = end_ms
-        return emitted_to
+        self._written = shape
+        return ready[-1][2]
 
     def _absorb_slivers(
         self, segments: list[tuple[Run, int, int]], seam_ms: int, nonmusic_ms: int

@@ -14,6 +14,10 @@ from .config import Config
 
 log = logging.getLogger("rockfm.buffer")
 
+# Segment timestamps drift by a millisecond or two; anything under this is the
+# next segment following on, not a hole in the recording.
+CONTIGUOUS_TOLERANCE_MS = 1500
+
 
 @dataclass(frozen=True)
 class Range:
@@ -40,7 +44,21 @@ class BufferReader:
     def read(
         self, start_ms: int, duration_ms: int, rate: int = ANALYSIS_RATE
     ) -> np.ndarray:
-        """Decode `duration_ms` of audio starting at wall-clock `start_ms`."""
+        """Decode `duration_ms` of audio starting at wall-clock `start_ms`.
+
+        Every sample sits where its wall clock says it should. Segments are laid
+        into the span at their own timestamps and anything missing stays silent,
+        rather than the recording being closed up around it.
+
+        Closing it up is what this used to do, and it moved everything after a
+        hole earlier by the length of the hole. Fourteen minutes went missing
+        one night and the songs that followed were written into the timeline
+        inside the gap they came after -- correctly identified, an hour of them
+        at the wrong time, with one track appearing twice.
+
+        Audio missing from the *end* is not padded: a short read is how the
+        analyzer knows it has reached the edge of what was recorded.
+        """
         if duration_ms <= 0:
             return np.zeros(0, dtype=np.float32)
         end_ms = start_ms + duration_ms
@@ -54,16 +72,41 @@ class BufferReader:
         if not rows:
             return np.zeros(0, dtype=np.float32)
 
-        paths = [self.config.segments_dir / row["relpath"] for row in rows]
-        samples = decode_segment_files(paths, rate=rate)
-        if samples.size == 0:
-            return samples
+        # Segments that follow on from one another decode together, as one
+        # stream; a break starts a new run placed at its own timestamp.
+        runs: list[list] = []
+        for row in rows:
+            previous = runs[-1][-1] if runs else None
+            follows_on = previous is not None and (
+                abs(row["pdt_ms"] - (previous["pdt_ms"] + previous["duration_ms"]))
+                <= CONTIGUOUS_TOLERANCE_MS
+            )
+            if follows_on:
+                runs[-1].append(row)
+            else:
+                runs.append([row])
 
-        # Trim to the exact requested span; decoding starts at the first segment.
-        lead_ms = max(0, start_ms - rows[0]["pdt_ms"])
-        begin = int(lead_ms * rate / 1000)
         want = int(duration_ms * rate / 1000)
-        return samples[begin : begin + want]
+        span = np.zeros(want, dtype=np.float32)
+        filled_to = 0
+        for run in runs:
+            samples = decode_segment_files(
+                [self.config.segments_dir / row["relpath"] for row in run], rate=rate
+            )
+            if samples.size == 0:
+                continue
+            at = int((run[0]["pdt_ms"] - start_ms) * rate / 1000)
+            if at < 0:                      # the run began before the span
+                samples = samples[-at:]
+                at = 0
+            room = want - at
+            if room <= 0:
+                continue
+            samples = samples[:room]
+            span[at : at + samples.size] = samples
+            filled_to = max(filled_to, at + samples.size)
+
+        return span[:filled_to]
 
     def has_gap(self, start_ms: int, end_ms: int) -> bool:
         return bool(db.gaps_between(self.conn, start_ms, end_ms))

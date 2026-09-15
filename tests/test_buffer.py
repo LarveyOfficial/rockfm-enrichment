@@ -116,3 +116,76 @@ def test_abutting_timeline_rows_do_not_displace_each_other(tmp_path):
     db.upsert_timeline(conn, {"start_ms": 0, "end_ms": 10_000, "kind": "cancion"}, 0)
     db.upsert_timeline(conn, {"start_ms": 10_000, "end_ms": 20_000, "kind": "cancion"}, 0)
     assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 2
+
+
+# --- a hole in the recording must stay a hole -------------------------------
+
+
+def _recorded(tmp_path, pdts, duration_ms=6000):
+    """A buffer holding segments at the given timestamps, and a reader for it."""
+    from rockfm.buffer import BufferReader
+
+    config = Config(data_dir=tmp_path, buffer_hours=6)
+    config.ensure_dirs()
+    conn = db.connect(config.db_path)
+    for index, pdt in enumerate(pdts):
+        (config.segments_dir / f"{pdt}.aac").write_bytes(b"x")
+        db.insert_segment(conn, pdt_ms=pdt, seq=index, duration_ms=duration_ms,
+                          relpath=f"{pdt}.aac", size=1, fetched_ms=0)
+    conn.commit()
+    return BufferReader(conn, config)
+
+
+def _decode_as(monkeypatch, marker_for, duration_ms=6000):
+    """Decode each run to a constant, so where it lands is visible."""
+    import numpy as np
+
+    from rockfm import buffer as buffer_module
+
+    def decode(paths, rate):
+        marker = marker_for(int(paths[0].stem))
+        return np.full(int(len(paths) * duration_ms * rate / 1000), marker, dtype=np.float32)
+
+    monkeypatch.setattr(buffer_module, "decode_segment_files", decode)
+
+
+def test_audio_after_a_hole_keeps_its_own_timestamps(tmp_path, monkeypatch):
+    """Closing the recording up around a hole moves everything after it earlier.
+
+    Fourteen minutes went missing one night, and the songs that followed were
+    written into the timeline inside the gap they came after -- identified
+    correctly, an hour of them at the wrong time.
+    """
+    import numpy as np
+
+    rate = 8000
+    reader = _recorded(tmp_path, [0, 6000, 60_000, 66_000])
+    _decode_as(monkeypatch, lambda pdt: 1.0 if pdt < 60_000 else 2.0)
+
+    span = reader.read(0, 72_000, rate=rate)
+    at = lambda ms: span[int(ms * rate / 1000)]
+
+    assert at(0) == 1.0 and at(11_000) == 1.0, "the first run moved"
+    assert at(30_000) == 0.0, "the hole was closed up instead of left silent"
+    assert at(60_500) == 2.0, "audio after the hole did not keep its own time"
+    assert np.count_nonzero(span == 0.0) > 0
+
+
+def test_a_short_recording_is_not_padded_out_at_the_end(tmp_path, monkeypatch):
+    """A short read is how the analyzer knows it reached the edge of the tape."""
+    rate = 8000
+    reader = _recorded(tmp_path, [0, 6000])
+    _decode_as(monkeypatch, lambda _pdt: 1.0)
+
+    span = reader.read(0, 600_000, rate=rate)
+    assert span.size == int(12_000 * rate / 1000)
+
+
+def test_a_run_starting_before_the_span_is_trimmed_not_shifted(tmp_path, monkeypatch):
+    rate = 8000
+    reader = _recorded(tmp_path, [0, 6000, 12_000])
+    _decode_as(monkeypatch, lambda _pdt: 1.0)
+
+    span = reader.read(9_000, 6_000, rate=rate)
+    assert span.size == int(6_000 * rate / 1000)
+    assert float(span[0]) == 1.0

@@ -140,24 +140,28 @@ def test_a_run_with_no_reported_start_falls_back_to_its_first_probe(tmp_path):
     assert analyzer._run_start(run, window()) == 48_000
 
 
-def test_the_end_comes_from_the_release_length(tmp_path):
+def test_the_end_does_not_come_from_the_release_length(tmp_path):
+    """The sleeve is not evidence about this airing.
+
+    A presenter can run a track to its end one hour and fade it early the next,
+    and the release says the same thing both times. Predicting the end from it
+    is wrong in exactly the case that matters.
+    """
     from rockfm.analyzer import Run
 
     analyzer = build(tmp_path)
     release(analyzer, "Mr. Big", "To Be with You", 208_000)
     run = Run(key="k", label=label("k", 10_000), first_ms=24_000, last_ms=48_000)
 
-    assert analyzer._run_end(run, 10_000, window()) == 218_000
+    # Heard to the last probe, not predicted out to 10_000 + 208_000.
+    assert analyzer._run_end(run, 10_000, window()) == 48_000 + PROBE_MS
 
 
-def test_a_song_heard_past_its_release_length_keeps_what_was_heard(tmp_path):
-    """Radio edits and live versions run to their own length, not the sleeve's."""
+def test_the_end_is_the_last_of_the_song_actually_heard(tmp_path):
     from rockfm.analyzer import Run
 
     analyzer = build(tmp_path)
-    release(analyzer, "Mr. Big", "To Be with You", 60_000)
     run = Run(key="k", label=label("k", 0), first_ms=0, last_ms=300_000)
-
     assert analyzer._run_end(run, 0, window()) == 300_000 + PROBE_MS
 
 
@@ -352,29 +356,35 @@ def test_a_start_reaches_back_into_the_gap_before_it(tmp_path):
     assert gap_before and gap_before[0][1] == 110_000, "the gap did not give way"
 
 
-def test_a_first_airing_still_ends_at_its_release_length(tmp_path):
-    """Enrichment used to run at commit, after the end was already decided.
+def test_a_song_ends_where_the_next_one_is_measured_to_begin(tmp_path):
+    """Back to back, the next song's start is the previous song's end.
 
-    So a song's first airing had no length to reason with and stopped at the
-    last probe that heard it -- up to a scan step short, which is the shortfall
-    this project kept rediscovering.
+    That start is measured to milliseconds. The alternative is to invent a gap
+    out of the twenty-four second step we did not probe.
     """
-    sleeve = _Sleeve(**{"one": 200_000})
     analyzer = build(tmp_path)
-    analyzer.enricher = sleeve
+    analyzer.enricher = _Sleeve()
 
-    # Nothing in song_meta: this is the first time the song has ever aired.
-    plan = plan_for(analyzer, [("a", "A", "one", 0, 24_000, 96_000)])
+    plan = plan_for(analyzer, [
+        ("a", "A", "one", 0, 24_000, 96_000),
+        ("b", "B", "two", 110_000, 120_000, 216_000),
+    ])
     placed = {run.key: (start, end) for run, start, end in plan}
 
-    assert sleeve.asked, "the release length was never looked up"
-    assert placed["a"][1] == 200_000, "the end fell back to the last probe"
+    assert placed["a"][1] == placed["b"][0] == 110_000
+    assert None not in placed, "a gap was invented between two adjacent songs"
 
 
-def test_a_missing_release_length_is_not_fatal(tmp_path):
+def test_a_real_break_after_a_song_stays_a_break(tmp_path):
+    """Far enough apart that something did happen in between."""
     analyzer = build(tmp_path)
-    analyzer.enricher = _Sleeve()          # knows nothing
+    analyzer.enricher = _Sleeve()
 
-    plan = plan_for(analyzer, [("a", "A", "one", 0, 24_000, 96_000)])
+    plan = plan_for(analyzer, [
+        ("a", "A", "one", 0, 24_000, 96_000),
+        ("b", "B", "two", 300_000, 312_000, 408_000),
+    ])
     placed = {run.key: (start, end) for run, start, end in plan}
-    assert placed["a"][1] == 96_000 + PROBE_MS
+
+    assert placed["a"][1] == 96_000 + PROBE_MS, "the end was stretched over a break"
+    assert None in placed, "the break between them was swallowed"

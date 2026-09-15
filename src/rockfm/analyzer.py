@@ -313,28 +313,6 @@ class Analyzer:
         value = row["duration_ms"] if row else None
         return int(value) if value else None
 
-    def _release_ms(self, label: Label | None) -> int | None:
-        """How long the release runs, asked before the edges are drawn.
-
-        Enrichment used to happen at commit, which is after the end has already
-        been decided -- so a song's first airing had no length to reason with
-        and its end fell back to the last probe that heard it, up to a scan step
-        short. That is the same shortfall the old design kept producing, wearing
-        different clothes. The lookup is cached and was going to happen anyway;
-        it just has to happen first.
-        """
-        if label is None or not (label.artist and label.title):
-            return None
-        stored = self._expected_ms(catalog_key(label.artist, label.title))
-        if stored:
-            return stored
-        try:
-            found = self.enricher.lookup(label.artist, label.title)
-        except Exception as exc:          # a length is a nicety, never a blocker
-            log.debug("no release length for %s: %s", label.title, exc)
-            return None
-        return getattr(found, "duration_ms", None) or None
-
     def _commit(self, item: Item) -> None:
         if self._extends_previous(item):
             return
@@ -574,19 +552,21 @@ class Analyzer:
         return max(run.first_ms, window.start_ms)
 
     def _run_end(self, run: Run, start_ms: int, window: Window) -> int:
-        """Where it stopped: its release length, or at least what we heard.
+        """Where it stopped, from what was heard and nothing else.
 
-        The recogniser places a start exactly but says nothing about length, so
-        the end is the release length where one is known. Radio edits run
-        shorter than the release and presenters talk over outros, so the next
-        song's own start trims this wherever the two disagree -- and that start
-        is measured, not predicted.
+        The release length is not evidence about this airing. A presenter can
+        run a track to its end one hour and fade it early the next, and the
+        sleeve says the same thing both times -- so predicting the end from it
+        is wrong precisely when it matters. It stays where it belongs, on the
+        item, describing the record.
+
+        What is known is that the last probe to name the song covered the audio
+        it sat on. Where the next song follows soon after, its own start is
+        measured and says exactly where this one stopped; `_plan` closes that.
+        Where nothing follows soon, the song ended somewhere in the step we did
+        not probe, and the honest answer is the last of it we actually heard.
         """
-        heard_to = min(run.last_ms + PROBE_MS, window.end_ms)
-        expected = self._release_ms(run.label)
-        if expected:
-            return min(max(start_ms + expected, heard_to), window.end_ms)
-        return heard_to
+        return min(run.last_ms + PROBE_MS, window.end_ms)
 
     def _plan(self, window: Window, probes: list[tuple[int, Label | None]]) -> list[tuple[Run, int, int]]:
         """Lay the window out from what the recogniser said.
@@ -611,11 +591,19 @@ class Analyzer:
                 songs.append([run, start_ms, end_ms])
 
         songs.sort(key=lambda item: item[1])
-        # Two songs cannot play at once. Where a release length overran the next
-        # song's start, the next song's own report of itself wins.
+        nonmusic_ms = int(settings.load(self.conn)["min_nonmusic_seconds"] * 1000)
         for index in range(len(songs) - 1):
-            if songs[index][2] > songs[index + 1][1]:
-                songs[index][2] = songs[index + 1][1]
+            end_ms, next_start = songs[index][2], songs[index + 1][1]
+            if end_ms > next_start:
+                # Two songs cannot play at once, and the later one's start is
+                # measured while this end is only the last of it we heard.
+                songs[index][2] = next_start
+            elif next_start - end_ms < nonmusic_ms:
+                # Too close together for anything to have happened between, so
+                # the song ran to where the next one began. That start is
+                # measured to milliseconds; the alternative is to invent a gap
+                # out of the step we did not probe.
+                songs[index][2] = next_start
 
         segments: list[tuple[Run, int, int]] = []
         cursor = window.start_ms
@@ -835,13 +823,15 @@ class Analyzer:
 
         assert run.label is not None
         confidence = run.label.confidence
-        expected = self._release_ms(run.label)
+        # A station that fades a track early has not made the identification
+        # any less certain, so this is worth saying out loud and nothing more.
+        # It used to cut the confidence, which treated the release length as
+        # evidence about this airing -- the same mistake as predicting the end
+        # from it, in a quieter place.
+        expected = self._expected_ms(catalog_key(run.label.artist, run.label.title))
         if expected:
             drift = abs((end_ms - start_ms) - expected) / expected
             if drift > DURATION_DISAGREEMENT:
-                # Radio edits are genuinely shorter than the release, so this is
-                # a reason to doubt the boundaries rather than to move them.
-                confidence = round(confidence * 0.6, 3)
                 log.info(
                     "%s - %s ran %.0fs against a release of %.0fs (%.0f%% out)",
                     run.label.artist, run.label.title,
@@ -859,13 +849,12 @@ class Analyzer:
             )
         )
         self._commit(item)
-        self._learn_once(window, run, start_ms, end_ms)
-        expected_note = f" of {expected / 1000:.0f}s" if expected else ""
+        heard = f" of {expected / 1000:.0f}s" if expected else ""
+        told = "" if run.label.started_ms is None else " start told"
         log.info(
-            "%s  %s - %s  (%.0fs%s, %s)  edges: start=%s end=%s",
+            "%s  %s - %s  (%.0fs%s, %s%s)",
             _clock(item.start_ms), item.artist, item.title,
-            item.duration_ms / 1000, expected_note, item.source,
-            run.start_stopped or "-", run.end_stopped or "-",
+            item.duration_ms / 1000, heard, item.source, told,
         )
 
     def _must_analyze_now(self, start_ms: int) -> bool:

@@ -14,6 +14,7 @@ from rockfm import strings_es as S
 from rockfm.analyzer import MIN_SONG_MS, Analyzer, Label, Run
 from rockfm.config import Config
 from rockfm.recognize.base import NullRecognizer
+from rockfm.rockfm_api import catalog_key
 
 RATE = 8000
 
@@ -338,3 +339,38 @@ def test_names_that_merely_rhyme_are_not_merged(tmp_path):
                   "Meat Loaf Dead Ringer For Love (Remastered 2016)")
     assert not _alike("Oasis Whatever", "Oasis Wonderwall")
     assert not _alike("Queen Radio Ga Ga", "Queen Under Pressure")
+
+
+def test_a_faded_song_is_not_a_less_certain_identification(tmp_path):
+    """A station that cuts a track short has not made Shazam any less sure.
+
+    The release length is not evidence about this airing -- a presenter can run
+    a track to its end one hour and fade it the next, and the sleeve says the
+    same thing both times. Docking confidence for the difference treated it as
+    evidence anyway.
+    """
+    import numpy as np
+
+    from rockfm.analyzer import Item, Label, Run, Window
+
+    analyzer = build(tmp_path)
+    analyzer._enriched = lambda item: item
+    committed: list[Item] = []
+    analyzer._commit = committed.append
+    db.upsert_song_meta(
+        analyzer.conn,
+        {"key": catalog_key("Mr. Big", "To Be with You"), "artist": "Mr. Big",
+         "title": "To Be with You", "duration_ms": 208_000},
+        0,
+    )
+
+    label = Label(key="415683", artist="Mr. Big", title="To Be with You",
+                  source="shazamio", confidence=1.0, started_ms=0)
+    run = Run(key="415683", label=label, first_ms=0, last_ms=90_000)
+    samples = np.zeros(int(600_000 / 1000 * 16_000), dtype=np.float32)
+
+    # Faded at ninety seconds against a release of 208s -- badly "out".
+    analyzer._commit_run(Window(0, 600_000, samples), run, 0, 90_000)
+
+    assert committed, "the song was not committed at all"
+    assert committed[0].confidence == 1.0

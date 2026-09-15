@@ -71,7 +71,6 @@ class Config:
 
     # --- recognition / classification ---
     recognizer: str = field(default_factory=lambda: _env("RECOGNIZER", "shazamio"))
-    seed_on_start: bool = field(default_factory=lambda: _bool("SEED_ON_START", True))
 
     # --- azuracast ---
     # Only the codec stays here: changing it means restarting the ffmpeg source

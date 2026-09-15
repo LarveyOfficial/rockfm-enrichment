@@ -1,28 +1,41 @@
 """Work out what actually aired, and when.
 
-Runs on recorded audio roughly six hours before it goes out, which is what makes
-the expensive part affordable: there is time to probe, bisect boundaries and
-look things up.
+Runs on recorded audio roughly six hours before it goes out, which is what
+makes asking anything at all affordable: there is time to probe and look things
+up long before any of it is heard.
 
 The pass over a window is:
 
-  1. scan at a coarse stride, identifying each probe *independently* -- local
-     fingerprint index first (free), external recogniser only on a miss
-  2. group consecutive probes that named the same track into runs
-  3. refine each run's edges by bisecting, which is free: both neighbouring
-     tracks have just been learned, so the local index can answer "A or B?"
-  4. enrich and commit
-  5. re-fingerprint the whole aired span and replace the reference, so every
-     later airing of that song is recognised locally at zero cost
+  1. scan at a coarse stride, asking the recogniser what is playing
+  2. group consecutive probes naming the same recording into runs
+  3. lay each run out: it begins where the recogniser said it began, and ends
+     at its release length or where the next song starts, whichever comes first
+  4. whatever is left between songs is not a song
+  5. enrich and commit
 
-Identifying each probe independently matters. An earlier version grew a run
-outwards and learned as it went, which quietly ran away: a probe straddling a
-song change still half-matches the outgoing song, gets learned, and drags the
-reference into the next track. Independent identification cannot drift.
+Step 3 used to be most of this file. A local fingerprint index was taught each
+song's extent, walked outwards to find where the song continued, and bisected
+with short probes to place the edge. It resolved to 400 ms, only worked
+properly from a song's second airing, and cost about a thousand local matches
+per probe -- thirty seconds of arithmetic to place twenty-four seconds of
+audio, with the network not involved at all.
 
-Probes are 12 s because that is what Shazam's signature format requires; see
-recognize/shazam.py. A probe that straddles a song change matches neither side,
-which is a useful signal rather than a failure -- it marks a boundary.
+None of that was necessary. A probe that names a song also reports how far into
+it the probe was: measured across one airing, probes thirty seconds apart came
+back 30.001 s apart, with three milliseconds of spread over the whole song. The
+start is arithmetic, from the first probe that names the song, and it is far
+more precise than the search ever was.
+
+The index also made mistakes the search could not: the same recording could sit
+in it twice, learned from air and seeded from the station's catalogue under a
+different name, and a run broke in half wherever a probe matched the other
+copy. Identity now comes from the recogniser's own id for the recording, which
+does not vary between releases.
+
+Probes are 12 s because that is what Shazam's signature format wants; see
+recognize/shazam.py. A probe straddling a song change matches neither side,
+which is a signal rather than a failure -- the scan shifts along and asks
+again, and measures the answer from wherever it actually asked.
 """
 
 from __future__ import annotations
@@ -31,19 +44,16 @@ import logging
 import re
 import sqlite3
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import numpy as np
-from scipy.signal import resample_poly
 
-from . import db, fingerprint, settings
+from . import db, settings
 from . import strings_es as S
-from .audio import ANALYSIS_RATE
 from .buffer import BufferReader
 from .config import Config
 from .enrich import Enricher
-from .fingerprint import FingerprintIndex
 from .recognize import Recognition
 from .recognize import build as build_recognizer
 from .rockfm_api import RockFmApi, catalog_key
@@ -55,48 +65,11 @@ log = logging.getLogger("rockfm.analyzer")
 RECOGNIZE_RATE = 16000
 PROBE_MS = 12_000          # fixed by Shazam's signature format
 STEP_MS = 24_000           # coarse scan stride; songs are far longer than this
-# Bisection never calls the external recogniser -- it queries our own index --
-# so it is not bound by Shazam's sample length. Measured against a reference
-# learned from the same broadcast audio, a 2 s probe still matched 100% of the
-# time and reported its position to within 0.016 s, so the probe can be short.
-# That matters: the boundary correction is half the probe length, so a 12 s
-# probe put a six second guess into every edge.
-BISECT_PROBE_MS = 2_000
-BISECT_MIN_VOTES = 5
-# Offset-derived start estimates should agree closely; if they scatter, the
-# reference is not trustworthy and bisection is the safer answer.
-OFFSET_AGREEMENT_MS = 4_000
 # Where to look again when a probe comes back empty, before concluding there is
 # no song there.
 RETRY_OFFSETS_MS = (5_000, 10_000)
 # How far a run may stray from the release length before we distrust it.
 DURATION_DISAGREEMENT = 0.35
-# How far an offset-derived start may sit from the edge we searched for before
-# we distrust it and keep the searched one.
-OFFSET_TRUST_MS = 15_000
-# How much a still-growing run must gain before its reference is refreshed.
-RELEARN_GROWTH_MS = 90_000
-# The coarse scan steps 24s, so a song can end up to a step past its last
-# matching probe. The reference is learned from that probe extent, and the edge
-# search cannot confirm a song beyond what the reference covers -- so the end
-# landed systematically early, and the song's tail leaked into whatever came
-# next. Walking the extent out in finer steps first costs a few probes and
-# removes the bias.
-EXTEND_STEP_MS = 6_000
-EXTEND_LIMIT_MS = 24_000
-# External calls an edge may spend when the index cannot speak for the audio.
-# Extension runs before the song is learned, so the reference is whatever named
-# it -- a 12 s probe, or a 30 s catalogue preview. Asking only the index there
-# stops at the reference's coverage rather than the song's end, which put every
-# edge short and invented gaps between songs that actually abut.
-#
-# Enough to walk the whole way out. Grounding covers to one probe past the last
-# match, and a probe *starting* there already reaches beyond it, so the index
-# answers for a step at most -- which made a smaller budget, not EXTEND_LIMIT_MS,
-# the real stopping point. A song ended thirteen seconds early on a budget worth
-# twelve. The limit above is the bound; this must not quietly undercut it.
-EXTEND_EXTERNAL_BUDGET = EXTEND_LIMIT_MS // EXTEND_STEP_MS
-BISECT_LIMIT_MS = 400      # boundary precision we stop refining at
 MIN_SONG_MS = 45_000       # floor for songs of unknown length
 # A song has to run for a decent share of itself to count as having been played.
 # Stations trail tracks over links and play stings built from them, and those
@@ -123,7 +96,6 @@ MAX_BRIDGE_MS = 60_000
 # How far a run may exceed the release length before we stop trusting it.
 DURATION_TOLERANCE = 1.4
 TAIL_GUARD_MS = 90_000     # leave the newest audio alone; it may still be arriving
-MIN_LOCAL_SCORE = 0.02
 # Boundary tests need a stricter bar than identification. A probe only has to
 # overlap a song slightly to be identified, but for locating an edge we want the
 # probe to be *mostly* that song -- so the last probe that passes sits about half
@@ -160,7 +132,11 @@ class Label:
     title: str
     source: str
     confidence: float
-    track_id: int
+    # Absolute wall clock of the moment this recording began, as the recogniser
+    # reports it. This is the whole of the boundary machinery now: a probe that
+    # names a song also says how far into it we are, to about three
+    # milliseconds, so the start is arithmetic rather than a search.
+    started_ms: int | None = None
 
 
 @dataclass
@@ -172,8 +148,9 @@ class Run:
     # Why extension stopped at each edge. Recorded because the difference
     # between "the song ended" and "we ran out of ways to ask" is invisible in
     # the finished timeline, and that is exactly what goes wrong.
-    end_stopped: str = ""
-    start_stopped: str = ""
+    # Every probe in the run independently reports where the song began. They
+    # agree to milliseconds, so the median of them is the start.
+    starts: list[int] = field(default_factory=list)
 
 
 class Window:
@@ -183,13 +160,6 @@ class Window:
         self.start_ms = start_ms
         self.end_ms = end_ms
         self.samples16 = samples16
-        # Anti-aliased downsample; fingerprinting works at 8 kHz.
-        self.samples8 = (
-            resample_poly(samples16, 1, RECOGNIZE_RATE // ANALYSIS_RATE).astype(np.float32)
-            if samples16.size
-            else samples16
-        )
-
     def _slice(self, samples: np.ndarray, rate: int, at_ms: int, length_ms: int) -> np.ndarray:
         begin = int((at_ms - self.start_ms) * rate / 1000)
         if begin < 0:
@@ -198,9 +168,6 @@ class Window:
         if end > samples.size:
             return np.zeros(0, dtype=np.float32)
         return samples[begin:end]
-
-    def probe8(self, at_ms: int, length_ms: int = PROBE_MS) -> np.ndarray:
-        return self._slice(self.samples8, ANALYSIS_RATE, at_ms, length_ms)
 
     def probe16(self, at_ms: int, length_ms: int = PROBE_MS) -> np.ndarray:
         return self._slice(self.samples16, RECOGNIZE_RATE, at_ms, length_ms)
@@ -220,7 +187,6 @@ class Analyzer:
         self.config = config
         self.conn = conn
         self.reader = BufferReader(conn, config)
-        self.index = FingerprintIndex(conn)
         self.recognizer = recognizer if recognizer is not None else build_recognizer(config.recognizer)
         if enricher is not None:
             self.enricher = enricher
@@ -237,26 +203,9 @@ class Analyzer:
         # looked up.
         self.schedule = Schedule()
         self.external_calls = 0
-        # Extents already taught to the index this window, so that planning --
-        # which now runs after nearly every probe -- does not re-fingerprint
-        # minutes of audio each time.
-        self._learned: dict[str, tuple[int, int]] = {}
-        # Songs already committed this window. Their reference has been taught
-        # from boundary-refined edges, which is strictly better than the raw
-        # probe extent -- so planning must not overwrite it with the worse one.
-        self._settled: set[str] = set()
-        self._grounded: set[str] = set()
-        # Extension results, keyed by the raw extent that produced them. See
-        # `_extend`: planning repeats after every probe and the answer only
-        # changes when the raw extent does.
-        self._extents: dict[
-            tuple[str | None, int, int], tuple[int, int, str, str]
-        ] = {}
         # Set when a window ends with audio nobody could identify because the
         # recogniser was down. The cursor stops there rather than past it.
         self._held = False
-        # Why the edge being extended stopped, filled in as it happens.
-        self._why = ""
 
     # --- cursor ---
 
@@ -287,17 +236,6 @@ class Analyzer:
         )
 
     # --- identification and boundary refinement ---
-
-    def _local(
-        self, window: Window, at_ms: int, min_score: float = MIN_LOCAL_SCORE
-    ) -> fingerprint.Match | None:
-        probe = window.probe8(at_ms)
-        if probe.size == 0:
-            return None
-        match = self.index.match(fingerprint.compute(probe), kind="music")
-        if match and match.score >= min_score:
-            return match
-        return None
 
     def _external(self, window: Window, at_ms: int) -> Recognition | None:
         probe = window.probe16(at_ms)
@@ -374,56 +312,6 @@ class Analyzer:
         row = db.get_song_meta(self.conn, key)
         value = row["duration_ms"] if row else None
         return int(value) if value else None
-
-    def _edge_match(self, window: Window, at_ms: int, key: str) -> bool:
-        """Is this short probe still `key`? Used only for locating boundaries."""
-        probe = window.probe8(at_ms, BISECT_PROBE_MS)
-        if probe.size == 0:
-            return False
-        match = self.index.match(
-            fingerprint.compute(probe), kind="music", min_votes=BISECT_MIN_VOTES
-        )
-        return match is not None and match.key == key
-
-    def _same_track(
-        self, window: Window, at_ms: int, key: str, min_score: float = MIN_LOCAL_SCORE
-    ) -> bool:
-        match = self._local(window, at_ms, min_score)
-        return match is not None and match.key == key
-
-    def _start_from_offsets(self, window: Window, run: Run) -> int | None:
-        """Where the song started, read straight off the match offsets.
-
-        Once a reference is anchored at a song's start, a match reports how far
-        into the song the probe was -- measured accurate to about one frame. So
-        every probe in the run independently says where the song began, and the
-        median of them beats any binary search. Only works from a song's second
-        airing on; the first has nothing anchored to measure against.
-        """
-        if run.label is None:
-            return None
-        track = self.index.get(run.label.track_id)
-        if track is None or not track["song_anchored"]:
-            return None
-
-        estimates: list[int] = []
-        position = run.first_ms
-        while position <= run.last_ms and window.covers(position):
-            match = self._local(window, position)
-            if match is not None and match.key == run.key:
-                estimates.append(position - int(match.offset_seconds * 1000))
-            position += STEP_MS
-        if len(estimates) < 3:
-            return None
-
-        estimates.sort()
-        spread = estimates[-1] - estimates[0]
-        if spread > OFFSET_AGREEMENT_MS:
-            log.debug("offset estimates disagree by %.1fs; falling back", spread / 1000)
-            return None
-        return estimates[len(estimates) // 2]
-
-    # --- committing ---
 
     def _commit(self, item: Item) -> None:
         if self._extends_previous(item):
@@ -572,143 +460,49 @@ class Analyzer:
     # --- main pass ---
 
     def _identify(self, window: Window, at_ms: int, *, retry: bool = True) -> Label | None:
-        """Name the audio at `at_ms`, independently of any neighbouring probe.
+        """Name the audio at `at_ms`, and say where that recording began.
 
-        `retry` is for callers who are asking a question a miss already answers.
-        Shifting along and asking again earns its keep during the scan, where a
-        miss writes off a whole 24s stretch -- but not where the miss is the
-        expected result.
+        One question to one recogniser. There used to be a local fingerprint
+        index in front of this, and most of the analyzer existed to serve it:
+        teach it a song's extent, walk outwards asking whether the song
+        continued, bisect the edges with short probes. All of that was a way of
+        finding a boundary -- and the recogniser reports the boundary directly,
+        in the same answer that names the song, an order of magnitude more
+        precisely than bisection ever resolved.
 
-        Nothing stands between a probe and the recogniser. A cheap speech check
-        used to, to save calls on presenter talk, and it cost far more than it
-        saved: on a Mr. Big track the recogniser names at every offset, it read
-        two probes as speech -- ratios of 0.88 and 1.00 -- and both were the
-        song's intro and outro, the exact audio the edges are decided from. A
-        probe it drops is a song we never hear about.
+        The index also made its own mistakes. The same recording could sit in
+        it twice, learned from air and seeded from the station's catalogue under
+        a different name, and a run would break in half where a probe matched
+        the other copy. Identity now comes from the recogniser's own id for the
+        recording, which does not vary between releases.
         """
-        match = self._local(window, at_ms)
-        if match is not None:
-            self.index.bump(match.track_id)
-            return Label(
-                key=match.key,
-                artist=match.artist or "",
-                title=match.title or "",
-                source="local",
-                confidence=_confidence(match),
-                track_id=match.track_id,
-            )
-
+        asked_at = at_ms
         found = self._external(window, at_ms)
         if found is None and retry and not self._recognizer_degraded():
-            # The same song can match at one offset and miss at another, so a
-            # single miss is not evidence of silence. Shift along and ask again
-            # before writing the stretch off.
-            #
-            # Only worth doing while the recogniser is actually answering. When
-            # it is not, asking twice more turns every probe into three dead
-            # calls, and the scan pays the timeout three times over for nothing.
-            for retry in RETRY_OFFSETS_MS:
-                if not window.covers(at_ms + retry):
+            # A probe that straddles a change matches neither side. Shift along
+            # and ask again before writing the stretch off.
+            for shift in RETRY_OFFSETS_MS:
+                if not window.covers(at_ms + shift):
                     break
-                found = self._external(window, at_ms + retry)
+                found = self._external(window, at_ms + shift)
                 if found is not None:
+                    asked_at = at_ms + shift
                     break
         if found is None:
             return None
-        key = catalog_key(found.artist, found.title)
-        track = self.index.find(key)
-        if track is None:
-            track_id = self.index.add(
-                kind="music",
-                key=key,
-                hashes=fingerprint.compute(window.probe8(at_ms)),
-                title=found.title,
-                artist=found.artist,
-                source="broadcast",
-                anchor_ms=at_ms,
-            )
-        else:
-            track_id = int(track["id"])
+
+        started_ms = None
+        if found.offset_seconds is not None:
+            started_ms = asked_at - int(round(found.offset_seconds * 1000))
+
         return Label(
-            key=key,
+            key=found.track_id or catalog_key(found.artist, found.title),
             artist=found.artist,
             title=found.title,
             source=found.provider,
             confidence=found.confidence,
-            track_id=track_id,
+            started_ms=started_ms,
         )
-
-    def _last_match(self, window: Window, low: int, high: int, key: str) -> int:
-        """Latest position in [low, high] that still reads as `key`."""
-        while high - low > BISECT_LIMIT_MS:
-            middle = (low + high) // 2
-            if not window.covers(middle, BISECT_PROBE_MS):
-                break
-            if self._edge_match(window, middle, key):
-                low = middle
-            else:
-                high = middle
-        return low
-
-    def _first_match(self, window: Window, low: int, high: int, key: str) -> int:
-        """Earliest position in [low, high] that reads as `key`."""
-        while high - low > BISECT_LIMIT_MS:
-            middle = (low + high) // 2
-            if not window.covers(middle, BISECT_PROBE_MS):
-                break
-            if self._edge_match(window, middle, key):
-                high = middle
-            else:
-                low = middle
-        return high
-
-    def _boundary(self, window: Window, earlier: Run, later: Run) -> int:
-        """Where one run gives way to the next.
-
-        Both edges are located, not one: the last moment the outgoing song can
-        still be heard and the first the incoming song can. On a hard cut those
-        coincide. Across a crossfade they do not -- both songs are genuinely
-        present for a few seconds -- and the honest boundary is the middle of
-        that overlap rather than an edge picked arbitrarily from one side.
-
-        A probe starting at t covers the next BISECT_PROBE_MS, so it stops
-        reading as the outgoing song about half a probe before the change; half
-        a probe is added back. With a two second probe that correction is one
-        second, where the twelve second probe this used to take made it six.
-        """
-        # Run extents come from twelve second probes, which read as a song while
-        # most of the probe lies inside it -- so each extent is soft by up to
-        # half a probe, and the true change can sit outside the bracket they
-        # form. Searching only between them caps the answer at whichever extent
-        # overshot: a backward extension reaching half a probe into the outgoing
-        # song pulled every boundary that far early, shortening the song by five
-        # seconds however precise the bisection. The edge probes are two seconds
-        # long, so looking half a probe further out costs a step and no accuracy.
-        margin = PROBE_MS // 2
-        low = max(earlier.last_ms - margin, earlier.first_ms)
-        high = min(later.first_ms + margin, later.last_ms + PROBE_MS)
-        if high < low:
-            low, high = earlier.last_ms, later.first_ms
-        correction = BISECT_PROBE_MS // 2
-
-        if earlier.key is None and later.key is None:
-            return later.first_ms
-        if earlier.key is None:
-            return max(self._first_match(window, low, high, later.key) + correction,
-                       earlier.first_ms)
-        if later.key is None:
-            return min(self._last_match(window, low, high, earlier.key) + correction,
-                       later.first_ms + PROBE_MS)
-
-        last_outgoing = self._last_match(window, low, high, earlier.key)
-        first_incoming = self._first_match(window, low, high, later.key)
-        if first_incoming < last_outgoing:
-            log.debug(
-                "crossfade of %.1fs between %s and %s",
-                (last_outgoing - first_incoming) / 1000, earlier.key, later.key,
-            )
-        middle = (last_outgoing + first_incoming) // 2
-        return max(low, min(middle + correction, high + PROBE_MS))
 
     def _probe_count(self, window: Window) -> int:
         span = window.end_ms - window.start_ms - PROBE_MS
@@ -723,6 +517,8 @@ class Analyzer:
                 runs[-1].last_ms = position
             else:
                 runs.append(Run(key=key, label=label, first_ms=position, last_ms=position))
+            if label is not None and label.started_ms is not None:
+                runs[-1].starts.append(label.started_ms)
 
         # An unidentified stretch between two runs of the same song is part of
         # that song -- a quiet passage, or probes that landed somewhere the
@@ -744,263 +540,80 @@ class Analyzer:
 
         return merged
 
-    def _ground_reference(self, window: Window, run: Run) -> None:
-        """Teach the stretch already heard, before asking where it reaches.
+    def _run_start(self, run: Run, window: Window) -> int:
+        """Where the song began, as its own probes reported it."""
+        told = sorted(value for value in run.starts if value is not None)
+        if told:
+            start = told[len(told) // 2]
+            # It has to sit at or before the probe that heard it and inside the
+            # window. A wild answer is not worth trusting over the probe grid.
+            if window.start_ms <= start <= run.first_ms:
+                return start
+        return max(run.first_ms, window.start_ms)
 
-        Extension asks "is this still the same song?" every six seconds. That is
-        a question the local index answers in milliseconds -- but only about
-        audio it has a reference for, and at this point a freshly identified
-        song has nothing but the twelve second probe that named it. So every
-        step missed locally and fell through to the network: eight lookups per
-        song, per window, to establish an edge.
+    def _run_end(self, run: Run, start_ms: int, window: Window) -> int:
+        """Where it stopped: its release length, or at least what we heard.
 
-        Learning the run's own extent first costs one pass over audio already in
-        memory and turns all eight into local answers. Once per song per window
-        is enough; the extension that follows only widens what is learned here,
-        and the commit relearns the refined span properly.
+        The recogniser places a start exactly but says nothing about length, so
+        the end is the release length where one is known. Radio edits run
+        shorter than the release and presenters talk over outros, so the next
+        song's own start trims this wherever the two disagree -- and that start
+        is measured, not predicted.
         """
-        if run.key is None or run.label is None or run.key in self._grounded:
-            return
-        self._grounded.add(run.key)
-
-        track = self.index.get(run.label.track_id)
-        if track is None:
-            return
-        # A song carrying a reference learned from real boundaries already
-        # answers locally, and adding the coarse extent on top of it would only
-        # blur what the edge search depends on.
-        if track["song_anchored"] and track["learned_ms"]:
-            return
-
-        start_ms = run.first_ms
-        end_ms = min(run.last_ms + PROBE_MS, window.end_ms)
-        if end_ms <= start_ms:
-            return
-        span = window.probe8(start_ms, end_ms - start_ms)
-        if span.size == 0:
-            return
-
-        # Added, not swapped in. This is provisional coverage to make extension
-        # answerable locally -- it is not a claim about where the song begins or
-        # ends, so it must not mark the reference song-anchored or record itself
-        # as the learned span. Doing either would let this coarse extent stand
-        # in for the refined one the commit teaches, which is how a reference
-        # erodes: each pass learning from the last pass's approximation.
-        anchor_ms = int(track["anchor_ms"] or 0)
-        shift = int(round((start_ms - anchor_ms) / 1000 * fingerprint.FRAMES_PER_SECOND))
-        self.index.extend(run.label.track_id, fingerprint.compute(span), shift)
-
-    def _extend(self, window: Window, run: Run) -> None:
-        """Extend a run, or recall what extending it produced last time.
-
-        Planning happens after almost every probe, and it re-plans every run in
-        the window, not just the one the scan is near. Extension is eight local
-        matches an edge, so a window of ten runs was paying thousands of them --
-        and the answer cannot change unless the run's raw extent has. Measured
-        on air with a fully learned index this was eighty seconds a probe, for
-        audio twenty-four seconds long: a third of real time, losing ground
-        against the stream that feeds it.
-        """
-        raw = (run.key, run.first_ms, run.last_ms)
-        remembered = self._extents.get(raw)
-        if remembered is not None:
-            run.first_ms, run.last_ms, run.start_stopped, run.end_stopped = remembered
-            return
-        self._extend_run(window, run)
-        self._extents[raw] = (
-            run.first_ms, run.last_ms, run.start_stopped, run.end_stopped,
+        heard_to = min(run.last_ms + PROBE_MS, window.end_ms)
+        expected = (
+            self._expected_ms(catalog_key(run.label.artist, run.label.title))
+            if run.label
+            else None
         )
-
-    def _extend_run(self, window: Window, run: Run) -> None:
-        """Find where a run really reaches, not where the 24s grid landed.
-
-        The scan only asks every 24 seconds, so a song's last matching probe can
-        sit a full step short of its actual end. Everything downstream inherits
-        that: the reference is learned from this extent, and the edge search
-        cannot confirm the song past what the reference covers. Stepping out in
-        six second increments until identification stops costs a handful of
-        probes -- local ones, once the song is known -- and removes the bias.
-
-        Each edge asks the index first and pays for an answer only when the
-        index has none -- see `_continues`. Each direction gets its own small
-        budget, so a song costs a few calls to bound properly rather than the
-        eight it once spent asking questions it already had answers to.
-        """
-        if run.key is None:
-            return
-
-        budget = [EXTEND_EXTERNAL_BUDGET]
-        reach = run.last_ms
-        self._why = "limit"
-        while reach - run.last_ms < EXTEND_LIMIT_MS:
-            candidate = reach + EXTEND_STEP_MS
-            if not window.covers(candidate):
-                self._why = "window edge"
-                break
-            if not self._continues(window, candidate, run.key, budget):
-                break
-            reach = candidate
-        run.last_ms = reach
-        run.end_stopped = self._why
-
-        budget = [EXTEND_EXTERNAL_BUDGET]
-        start = run.first_ms
-        self._why = "limit"
-        while run.first_ms - start < EXTEND_LIMIT_MS:
-            candidate = start - EXTEND_STEP_MS
-            if candidate < window.start_ms or not window.covers(candidate):
-                self._why = "window edge"
-                break
-            if not self._continues(window, candidate, run.key, budget):
-                break
-            start = candidate
-        run.first_ms = start
-        run.start_stopped = self._why
-
-    def _continues(
-        self, window: Window, at_ms: int, key: str, budget: list[int]
-    ) -> bool:
-        """Is `key` still playing at `at_ms`?
-
-        The index answers for free wherever it has been taught. At an edge it
-        usually has not been: extension runs before the song is learned, so the
-        reference is only whatever named it. A local miss there is therefore not
-        evidence the song ended -- it may just mean we have run out of
-        reference, and treating the two the same is what put every edge short.
-
-        So when the index has nothing to say, buy one answer, up to a fixed
-        budget per edge. Once the run is committed the whole aired span is
-        learned, and later airings resolve the same edges locally throughout.
-        """
-        if self._same_track(window, at_ms, key):
-            return True
-        if budget[0] <= 0:
-            self._why = "budget"
-            return False
-        if self._recognizer_degraded():
-            self._why = "recogniser down"
-            return False
-        budget[0] -= 1
-        found = self._identify(window, at_ms, retry=False)
-        if found is None:
-            self._why = "nothing there"
-            return False
-        if found.key != key:
-            self._why = f"became {found.key}"
-            return False
-        return True
-
-    def _learn_once(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
-        """Teach a span, unless this window already taught one covering it."""
-        if run.key is None or run.key in self._settled:
-            return
-        known = self._learned.get(run.key)
-        if known is not None and known[0] <= start_ms and known[1] >= end_ms:
-            return
-        # Never trade a longer reference for a shorter one. replace() clears
-        # what is there, so a downgrade permanently loses coverage the edge
-        # search depends on.
-        if run.label is not None:
-            existing = self.index.get(run.label.track_id)
-            if (
-                existing is not None
-                and existing["song_anchored"]
-                and existing["learned_ms"]
-                and existing["learned_ms"] > end_ms - start_ms
-            ):
-                log.debug(
-                    "keeping the longer reference for %s (%.0fs over %.0fs)",
-                    run.key, existing["learned_ms"] / 1000, (end_ms - start_ms) / 1000,
-                )
-                return
-        self._relearn(window, run, start_ms, end_ms)
-        self._learned[run.key] = (start_ms, end_ms)
-
-    def _relearn(self, window: Window, run: Run, start_ms: int, end_ms: int) -> None:
-        """Replace the reference with the whole aired span of this song."""
-        if run.label is None:
-            return
-        span = window.probe8(start_ms, end_ms - start_ms)
-        if span.size == 0:
-            return
-        self.index.replace(
-            run.label.track_id,
-            fingerprint.compute(span),
-            anchor_ms=start_ms,
-            learned_ms=end_ms - start_ms,
-        )
+        if expected:
+            return min(max(start_ms + expected, heard_to), window.end_ms)
+        return heard_to
 
     def _plan(self, window: Window, probes: list[tuple[int, Label | None]]) -> list[tuple[Run, int, int]]:
-        """Group probes into runs and work out where each one starts and ends."""
+        """Lay the window out from what the recogniser said.
+
+        Songs are placed where they said they began. Whatever is left between
+        them is not a song, and needs no examination to say so -- the previous
+        design searched for every edge and spent a thousand local matches a
+        probe doing it, thirty seconds of arithmetic to place twenty-four
+        seconds of audio.
+        """
         runs = self._group(probes)
         if not runs:
             return []
 
-        # Teach the index each song over the whole stretch it was heard across,
-        # before going looking for its edges. Bisection asks "is this still the
-        # same song?", and with only the twelve second probe that first
-        # identified it as a reference the answer was no almost everywhere, so
-        # the boundary collapsed onto the last coarse probe -- which is what
-        # pinned every song to a multiple of the scan step.
+        songs: list[list] = []
         for run in runs:
-            self._ground_reference(window, run)
-            self._extend(window, run)
+            if run.key is None or run.label is None:
+                continue
+            start_ms = self._run_start(run, window)
+            end_ms = self._run_end(run, start_ms, window)
+            if end_ms > start_ms:
+                songs.append([run, start_ms, end_ms])
 
-        for position, run in enumerate(runs):
-            if run.key is None:
-                continue
-            # A song already learned from refined boundaries -- on an earlier
-            # airing or an earlier pass -- has a better reference than anything
-            # the raw probe extent could teach. Overwriting it with the coarse
-            # one shrinks what the edge search can confirm, so the song comes
-            # out shorter, and shorter again the next time round.
-            if run.label is not None:
-                existing = self.index.get(run.label.track_id)
-                if existing is not None and existing["song_anchored"]:
-                    continue
-            extent = (run.first_ms, run.last_ms + PROBE_MS)
-            known = self._learned.get(run.key)
-            # Already covered -- including by the wider, boundary-refined span
-            # a commit teaches, which supersedes the run's raw probe extent.
-            if known is not None and known[0] <= extent[0] and known[1] >= extent[1]:
-                continue
-            # The run at the end of the scan grows with every probe. Relearning
-            # it each time would re-fingerprint minutes of audio on every step,
-            # costing far more than the scan; it only has to be good enough to
-            # answer boundary questions, so it is refreshed in chunks. A run the
-            # scan has moved past is final and worth learning exactly.
-            still_growing = position == len(runs) - 1
-            if still_growing and known is not None and extent[1] - known[1] < RELEARN_GROWTH_MS:
-                continue
-            self._learn_once(window, run, *extent)
+        songs.sort(key=lambda item: item[1])
+        # Two songs cannot play at once. Where a release length overran the next
+        # song's start, the next song's own report of itself wins.
+        for index in range(len(songs) - 1):
+            if songs[index][2] > songs[index + 1][1]:
+                songs[index][2] = songs[index + 1][1]
 
-        # One shared boundary per adjacent pair, so items are contiguous and
-        # never overlap -- a radio stream has no gaps between one thing and the next.
-        edges = [window.start_ms]
-        for position in range(len(runs) - 1):
-            edges.append(self._boundary(window, runs[position], runs[position + 1]))
-        edges.append(window.end_ms)
+        segments: list[tuple[Run, int, int]] = []
+        cursor = window.start_ms
+        for run, start_ms, end_ms in songs:
+            if start_ms > cursor:
+                segments.append((_gap(cursor, start_ms), cursor, start_ms))
+            segments.append((run, start_ms, end_ms))
+            cursor = end_ms
+        if cursor < window.end_ms:
+            segments.append((_gap(cursor, window.end_ms), cursor, window.end_ms))
 
-        # A song heard before can say where it started directly, by reading the
-        # offset off its own match rather than searching for the edge. Measured
-        # accurate to about one frame, so it wins wherever it is available and
-        # broadly agrees with the edge we found. Adjusting the shared edge keeps
-        # the timeline contiguous.
-        for position in range(1, len(runs)):
-            told = self._start_from_offsets(window, runs[position])
-            if told is None:
-                continue
-            if abs(told - edges[position]) > OFFSET_TRUST_MS:
-                log.debug(
-                    "offset start %s disagrees with edge %s by %.1fs; keeping the edge",
-                    told, edges[position], abs(told - edges[position]) / 1000,
-                )
-                continue
-            if edges[position - 1] < told < edges[position + 1]:
-                edges[position] = told
+        # The stretch running to the window edge is still growing; the next pass
+        # sees more audio and finishes it.
+        if segments and segments[-1][2] >= window.end_ms:
+            segments = segments[:-1]
 
-        keep = runs[:-1] if len(runs) > 1 else runs
-        segments = [(run, edges[i], edges[i + 1]) for i, run in enumerate(keep)]
         live = settings.load(self.conn)
         return self._absorb_slivers(
             segments,
@@ -1020,10 +633,6 @@ class Analyzer:
         self._pace_recognizer()
         self._publish_recognizer_state()
         probes: list[tuple[int, Label | None]] = []
-        self._learned.clear()
-        self._settled.clear()
-        self._grounded.clear()
-        self._extents.clear()
         self._held = False
         total = self._probe_count(window)
         emitted_to = window.start_ms
@@ -1233,8 +842,6 @@ class Analyzer:
         )
         self._commit(item)
         self._learn_once(window, run, start_ms, end_ms)
-        if run.key:
-            self._settled.add(run.key)
         expected_note = f" of {expected / 1000:.0f}s" if expected else ""
         log.info(
             "%s  %s - %s  (%.0fs%s, %s)  edges: start=%s end=%s",
@@ -1311,18 +918,9 @@ def _alike(left: str, right: str) -> bool:
     return SequenceMatcher(None, a, b).ratio() >= MERGE_NAME_RATIO
 
 
-def _confidence(match: fingerprint.Match) -> float:
-    """How much to trust a local match.
-
-    Raw score alone is misleading: a short probe of a long reference scores low
-    even when it is unmistakably right. What separates a real match from a
-    coincidence is the margin -- how far ahead the winner is of the next best
-    alignment. A handful of votes spread evenly is noise; a hundred votes all
-    agreeing on one offset is not.
-    """
-    by_score = min(1.0, match.score / 0.5)
-    by_margin = min(1.0, match.margin / 5.0)
-    return round(0.4 * by_score + 0.6 * by_margin, 3)
+def _gap(start_ms: int, end_ms: int) -> Run:
+    """A stretch with no song in it."""
+    return Run(key=None, label=None, first_ms=start_ms, last_ms=end_ms)
 
 
 def _clock(epoch_ms: int) -> str:

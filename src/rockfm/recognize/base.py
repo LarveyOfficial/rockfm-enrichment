@@ -25,6 +25,22 @@ class Recognition:
     art_url: str | None = None
     provider: str = "unknown"
     confidence: float = 1.0
+    # How far into the recording this probe was, in seconds. Measured against a
+    # single airing it tracks real time exactly: probes thirty seconds apart
+    # reported offsets 30.001 s apart, and the spread across a whole song was
+    # three milliseconds. So the probe's own clock, minus this, is where the
+    # song began -- known from the first probe that names it, rather than
+    # searched for afterwards.
+    offset_seconds: float | None = None
+    # The recogniser's own id for the recording. Two probes of the same airing
+    # return the same id even when the display title differs between releases,
+    # which is what a name comparison cannot promise.
+    track_id: str | None = None
+
+    @property
+    def started_at(self) -> float | None:
+        """Seconds before this probe that the recording began."""
+        return None if self.offset_seconds is None else -self.offset_seconds
 
 
 @runtime_checkable

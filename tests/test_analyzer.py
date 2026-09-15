@@ -9,13 +9,12 @@ import numpy as np
 import pytest
 
 from rockfm.analyzer import PROBE_MS, Analyzer, Label, Window
-from rockfm.audio import ANALYSIS_RATE
 
 RECOGNIZE_RATE = 16000
 
 
 def label(key: str) -> Label:
-    return Label(key=key, artist="A", title=key, source="test", confidence=1.0, track_id=1)
+    return Label(key=key, artist="A", title=key, source="test", confidence=1.0)
 
 
 def test_group_merges_consecutive_identical_probes():
@@ -71,13 +70,6 @@ def test_window_slices_at_the_right_offset(window):
     assert probe.size == 12 * RECOGNIZE_RATE
     expected = window.samples16[10 * RECOGNIZE_RATE]
     assert probe[0] == pytest.approx(expected)
-
-
-def test_window_downsamples_for_fingerprinting(window):
-    assert window.samples8.size == pytest.approx(
-        window.samples16.size * ANALYSIS_RATE / RECOGNIZE_RATE, rel=0.01
-    )
-    assert window.probe8(1_000_000, 12_000).size == 12 * ANALYSIS_RATE
 
 
 def test_window_refuses_slices_outside_itself(window):

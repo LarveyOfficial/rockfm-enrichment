@@ -120,7 +120,7 @@ tr.sel td{background:#1f2733}
       <button data-h="6">6 h</button>
       <button data-h="24">24 h</button>
       <span style="flex:1"></span>
-      <button id="reanalyze" title="Re-run the analyzer over everything still buffered. Keeps the fingerprint index.">re-analyze buffer</button>
+      <button id="reanalyze" title="Re-run the analyzer over everything still buffered.">re-analyze buffer</button>
       <button id="stop" disabled>stop audio</button>
     </div>
     <div class="track" id="track"><div class="head" id="head"></div></div>
@@ -229,7 +229,6 @@ function renderChips() {
          : behind != null && behind > 900 ? 'warn' : ''),
     chip('segments', c.segments),
     chip('songs found', c.songs),
-    chip('learned', c.learned_songs),
     chip('gaps', status.gaps.length, status.gaps.length ? 'warn' : ''),
   ];
   if (b.state !== 'ready') {

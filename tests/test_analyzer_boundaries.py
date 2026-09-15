@@ -1,16 +1,15 @@
-"""Song boundaries must come from the audio, not from the scan geometry.
+"""Song boundaries come from the recogniser, not from a search.
 
-A live instance once emitted three consecutive songs at exactly 198.0s each --
-Foreigner (5:00), Kaiser Chiefs (3:25) and AC/DC (3:29) -- perfectly abutting.
-Nothing about that came from the music: 198 is 8 x the 24s scan step plus half a
-probe. Two faults combined. Windows were short enough for one song to fill one,
-so its edges fell on the window rather than on a change; and the only reference
-a freshly identified song had was the single 12s probe that found it, so the
-bisection that is supposed to locate the edge could not confirm the song
-anywhere else and collapsed onto the last coarse probe.
+The analyzer used to find edges by hunting for them: teach a local fingerprint
+index a song's extent, walk outwards asking whether the song continued, then
+bisect with short probes. It resolved to 400 ms, cost about a thousand local
+matches per probe, and only ever worked properly from a song's second airing.
 
-This drives the real grouping and boundary code over a synthetic timeline, with
-recognition stubbed, and checks the edges track the songs.
+The recogniser reports the position directly, in the same answer that names the
+song. Measured across one airing of a Mr. Big track, probes thirty seconds
+apart came back with offsets 30.001 s apart and the spread over the whole song
+was three milliseconds. So a start is arithmetic now, and these tests drive the
+real grouping and layout code over stubbed recognition to check it holds.
 """
 
 from __future__ import annotations
@@ -20,23 +19,18 @@ import pytest
 
 from rockfm import db
 from rockfm.analyzer import (
-    BISECT_PROBE_MS,
     MIN_WINDOW_MS,
     PROBE_MS,
+    STEP_MS,
     Analyzer,
     Label,
     Window,
 )
 from rockfm.config import Config
-from rockfm.recognize.base import NullRecognizer
+from rockfm.recognize.base import NullRecognizer, Recognition
 from rockfm.rockfm_api import catalog_key
 
-ARTIST, TITLE = "Def Leppard", "Let's Get Rocked"
-KEY = catalog_key(ARTIST, TITLE)
-
 RATE = 16_000
-# Deliberately different lengths; the bug made them all identical.
-SONGS = [("foreigner", 300), ("ruby", 205), ("tnt", 209), ("meatloaf", 302)]
 
 
 def build(tmp_path):
@@ -46,100 +40,205 @@ def build(tmp_path):
     return Analyzer(config, conn, recognizer=NullRecognizer(), enricher=object())
 
 
-@pytest.fixture
-def played():
-    spans, at = [], 0
-    for name, seconds in SONGS:
-        spans.append((at, at + seconds * 1000, name))
-        at += seconds * 1000
-    return spans
+def window():
+    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
+    return Window(0, MIN_WINDOW_MS, samples)
 
 
-def song_at(spans, ms):
-    for start, end, name in spans:
-        if start <= ms < end:
-            return name
-    return None
+def label(key, started_ms, artist="Mr. Big", title="To Be with You"):
+    return Label(key=key, artist=artist, title=title, source="shazamio",
+                 confidence=1.0, started_ms=started_ms)
 
 
-def run_analyzer(tmp_path, spans, passes=4):
+def release(analyzer, artist, title, ms):
+    db.upsert_song_meta(
+        analyzer.conn,
+        {"key": catalog_key(artist, title), "artist": artist, "title": title,
+         "duration_ms": ms},
+        0,
+    )
+
+
+# --- the probe reports where the song began --------------------------------
+
+
+def test_a_named_probe_says_where_the_recording_started(tmp_path):
     analyzer = build(tmp_path)
+    analyzer._external = lambda _w, at: Recognition(
+        artist="Mr. Big", title="To Be with You", provider="shazamio",
+        offset_seconds=51.35, track_id="284861603",
+    )
 
-    # A probe is twelve seconds long, so it reads as whatever song holds most
-    # of it -- the same model `same_track` and `edge_match` use below. Treating
-    # identification as though it resolved the instant at `at_ms` let the scan
-    # appear to find edges a probe-width sharper than it can, which is a
-    # property of the stub and not of the code under test.
-    def identify(_window, at_ms, **_kw):
-        name = song_at(spans, at_ms + PROBE_MS // 2)
-        if name is None:
-            return None
-        return Label(key=name, artist="x", title=name, source="stub",
-                     confidence=1.0, track_id=1)
-
-    # Once a run is learned, "is this still the same song?" is answerable
-    # anywhere inside it: a probe is that song if most of it lies within.
-    def same_track(_window, at_ms, key, min_score=0.0):
-        return song_at(spans, at_ms + PROBE_MS // 2) == key
-
-    # Boundary probes are much shorter, which is the whole point of them.
-    def edge_match(_window, at_ms, key):
-        return song_at(spans, at_ms + BISECT_PROBE_MS // 2) == key
-
-    committed: list = []
-    analyzer._identify = identify
-    analyzer._same_track = same_track
-    analyzer._edge_match = edge_match
-    analyzer._enriched = lambda item: item
-    analyzer._commit = committed.append
-    analyzer._relearn = lambda *args: None
-
-    cursor = 0
-    for _ in range(passes):
-        end = cursor + MIN_WINDOW_MS
-        samples = np.zeros(int((end - cursor) / 1000 * RATE), dtype=np.float32)
-        cursor = analyzer.process_window(Window(cursor, end, samples))
-    return committed
+    found = analyzer._identify(window(), 60_000)
+    assert found is not None
+    assert found.key == "284861603", "identity must be the recogniser's own id"
+    assert found.started_ms == 60_000 - 51_350
 
 
-def test_durations_are_not_locked_to_the_scan_geometry(tmp_path, played):
-    songs = [i for i in run_analyzer(tmp_path, played) if i.title]
-    durations = {round(i.duration_ms / 1000, 1) for i in songs}
-    assert len(songs) >= 3
-    assert len(durations) > 1, f"every song came out the same length: {durations}"
+def test_a_probe_with_no_offset_still_names_the_song(tmp_path):
+    """Not every recogniser reports a position; the song is still the song."""
+    analyzer = build(tmp_path)
+    analyzer._external = lambda _w, at: Recognition(
+        artist="Mr. Big", title="To Be with You", provider="audd",
+    )
+
+    found = analyzer._identify(window(), 60_000)
+    assert found is not None and found.started_ms is None
 
 
-def test_each_song_lands_close_to_its_real_length(tmp_path, played):
-    truth = dict(SONGS)
-    for item in run_analyzer(tmp_path, played):
-        if not item.title or item.title not in truth:
-            continue
-        # Short boundary probes should land these far tighter than the twelve
-        # second ones did; five seconds is a deliberately loose ceiling.
-        assert item.duration_ms / 1000 == pytest.approx(truth[item.title], abs=5)
+def test_a_shifted_retry_measures_from_where_it_asked(tmp_path):
+    """The offset is relative to the probe that answered, not the one that failed.
+
+    A probe straddling a change matches neither side, so the scan shifts along
+    and asks again. Measuring the answer from the original position would put
+    the start wrong by exactly that shift.
+    """
+    analyzer = build(tmp_path)
+    answers = {65_000: Recognition(artist="Mr. Big", title="To Be with You",
+                                   provider="shazamio", offset_seconds=10.0)}
+    analyzer._external = lambda _w, at: answers.get(at)
+
+    found = analyzer._identify(window(), 60_000)
+    assert found is not None
+    assert found.started_ms == 65_000 - 10_000
 
 
-def test_items_never_overlap_and_leave_no_holes(tmp_path, played):
-    items = sorted(run_analyzer(tmp_path, played), key=lambda i: i.start_ms)
-    for earlier, later in zip(items, items[1:], strict=False):
-        assert later.start_ms == earlier.end_ms, "timeline must be contiguous"
+# --- turning several reports into one start --------------------------------
 
 
-def test_no_slivers_are_emitted_between_tracks(tmp_path, played):
-    """A rewound window re-sees a couple of seconds of the song just committed."""
-    items = run_analyzer(tmp_path, played)
-    interior = [i for i in items if i.start_ms > 0 and i.end_ms < 1_000_000]
-    assert all(i.duration_ms >= 20_000 for i in interior), [
-        (i.title or i.kind, i.duration_ms / 1000) for i in interior
-    ]
+def test_the_start_is_the_median_of_what_the_probes_said(tmp_path):
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    run = Run(key="k", label=label("k", 40_000), first_ms=48_000, last_ms=96_000)
+    run.starts = [40_100, 40_000, 39_900]
+
+    assert analyzer._run_start(run, window()) == 40_000
+
+
+def test_a_wild_start_is_not_trusted_over_the_probe_grid(tmp_path):
+    """A start after the probe that heard it, or outside the window, is wrong."""
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    w = window()
+
+    late = Run(key="k", label=label("k", 90_000), first_ms=48_000, last_ms=96_000)
+    late.starts = [90_000]                       # after the probe that heard it
+    assert analyzer._run_start(late, w) == 48_000
+
+    before = Run(key="k", label=label("k", -5_000), first_ms=48_000, last_ms=96_000)
+    before.starts = [-5_000]                     # before the window opens
+    assert analyzer._run_start(before, w) == 48_000
+
+
+def test_a_run_with_no_reported_start_falls_back_to_its_first_probe(tmp_path):
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    run = Run(key="k", label=label("k", None), first_ms=48_000, last_ms=96_000)
+    assert analyzer._run_start(run, window()) == 48_000
+
+
+def test_the_end_comes_from_the_release_length(tmp_path):
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    release(analyzer, "Mr. Big", "To Be with You", 208_000)
+    run = Run(key="k", label=label("k", 10_000), first_ms=24_000, last_ms=48_000)
+
+    assert analyzer._run_end(run, 10_000, window()) == 218_000
+
+
+def test_a_song_heard_past_its_release_length_keeps_what_was_heard(tmp_path):
+    """Radio edits and live versions run to their own length, not the sleeve's."""
+    from rockfm.analyzer import Run
+
+    analyzer = build(tmp_path)
+    release(analyzer, "Mr. Big", "To Be with You", 60_000)
+    run = Run(key="k", label=label("k", 0), first_ms=0, last_ms=300_000)
+
+    assert analyzer._run_end(run, 0, window()) == 300_000 + PROBE_MS
+
+
+# --- laying the window out -------------------------------------------------
+
+
+def plan_for(analyzer, spans):
+    """spans: (key, artist, title, told_start_ms, first_probe, last_probe)."""
+    probes: list[tuple[int, Label | None]] = []
+    for key, artist, title, told, first, last in spans:
+        position = first
+        while position <= last:
+            probes.append((position, label(key, told, artist, title)))
+            position += STEP_MS
+    return analyzer._plan(window(), probes)
+
+
+def test_songs_are_placed_where_they_said_they_began(tmp_path):
+    analyzer = build(tmp_path)
+    release(analyzer, "A", "one", 200_000)
+    release(analyzer, "B", "two", 200_000)
+
+    plan = plan_for(analyzer, [
+        ("a", "A", "one", 10_000, 24_000, 192_000),
+        ("b", "B", "two", 215_000, 216_000, 384_000),
+    ])
+    placed = {run.key: (start, end) for run, start, end in plan if run.key}
+
+    assert placed["a"][0] == 10_000
+    assert placed["b"][0] == 215_000
+
+
+def test_two_songs_never_overlap(tmp_path):
+    """A release length that overruns is trimmed by the next song's own start.
+
+    The start is measured; the length is metadata, and the station's copy may
+    be shorter. Where they disagree, the measurement wins.
+    """
+    analyzer = build(tmp_path)
+    release(analyzer, "A", "one", 400_000)      # far longer than it actually ran
+    release(analyzer, "B", "two", 200_000)
+
+    plan = plan_for(analyzer, [
+        ("a", "A", "one", 0, 24_000, 96_000),
+        ("b", "B", "two", 180_000, 192_000, 336_000),
+    ])
+    spans = [(start, end) for _run, start, end in plan]
+    for earlier, later in zip(spans, spans[1:], strict=False):
+        assert earlier[1] <= later[0], f"{earlier} overlaps {later}"
+
+
+def test_the_space_between_songs_becomes_a_gap(tmp_path):
+    analyzer = build(tmp_path)
+    release(analyzer, "A", "one", 100_000)
+    release(analyzer, "B", "two", 100_000)
+
+    plan = plan_for(analyzer, [
+        ("a", "A", "one", 0, 24_000, 72_000),
+        ("b", "B", "two", 200_000, 216_000, 264_000),
+    ])
+    kinds = [run.key for run, _s, _e in plan]
+    assert None in kinds, "the stretch between two songs was not marked as a gap"
+
+
+def test_the_stretch_running_to_the_window_edge_is_held_back(tmp_path):
+    """It is still growing; the next pass sees more audio and finishes it."""
+    analyzer = build(tmp_path)
+    release(analyzer, "A", "one", 100_000)
+
+    plan = plan_for(analyzer, [("a", "A", "one", 0, 24_000, 72_000)])
+    assert all(end < MIN_WINDOW_MS for _run, _start, end in plan)
+
+
+# --- folding away what is too small to stand alone -------------------------
 
 
 def test_absorb_slivers_folds_a_leading_tail_into_what_follows(tmp_path):
     from rockfm.analyzer import Run
 
-    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
-    tail = Run(key="a", label=label_a, first_ms=0, last_ms=0)
-    real = Run(key="b", label=label_a, first_ms=6_000, last_ms=200_000)
+    tail = Run(key="a", label=label("a", 0), first_ms=0, last_ms=0)
+    real = Run(key="b", label=label("b", 0), first_ms=6_000, last_ms=200_000)
     cleaned = build(tmp_path)._absorb_slivers(
         [(tail, 0, 2_000), (real, 2_000, 200_000)], 10_000, 10_000
     )
@@ -151,11 +250,9 @@ def test_a_short_unnamed_stretch_between_songs_is_split_between_them(tmp_path):
     """A crossfade belongs to neither song, so let them meet in the middle."""
     from rockfm.analyzer import Run
 
-    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
-    label_b = Label(key="b", artist="x", title="b", source="s", confidence=1, track_id=2)
-    song_a = Run(key="a", label=label_a, first_ms=0, last_ms=100_000)
-    seam = Run(key=None, label=None, first_ms=100_000, last_ms=100_000)
-    song_b = Run(key="b", label=label_b, first_ms=106_000, last_ms=300_000)
+    song_a = Run(key="a", label=label("a", 0), first_ms=0, last_ms=100_000)
+    seam = Run(key=None, label=None, first_ms=100_000, last_ms=106_000)
+    song_b = Run(key="b", label=label("b", 0), first_ms=106_000, last_ms=300_000)
 
     cleaned = build(tmp_path)._absorb_slivers(
         [(song_a, 0, 100_000), (seam, 100_000, 106_000), (song_b, 106_000, 300_000)],
@@ -166,14 +263,12 @@ def test_a_short_unnamed_stretch_between_songs_is_split_between_them(tmp_path):
 
 
 def test_a_presenter_link_between_songs_survives(tmp_path):
-    """Eighteen seconds of talk fell inside a single probe and was discarded."""
+    """Eighteen seconds of talk is a real thing that happened."""
     from rockfm.analyzer import Run
 
-    label_a = Label(key="a", artist="x", title="a", source="s", confidence=1, track_id=1)
-    label_b = Label(key="b", artist="x", title="b", source="s", confidence=1, track_id=2)
-    song_a = Run(key="a", label=label_a, first_ms=0, last_ms=100_000)
-    link = Run(key=None, label=None, first_ms=100_000, last_ms=100_000)
-    song_b = Run(key="b", label=label_b, first_ms=118_100, last_ms=300_000)
+    song_a = Run(key="a", label=label("a", 0), first_ms=0, last_ms=100_000)
+    link = Run(key=None, label=None, first_ms=100_000, last_ms=118_100)
+    song_b = Run(key="b", label=label("b", 0), first_ms=118_100, last_ms=300_000)
 
     cleaned = build(tmp_path)._absorb_slivers(
         [(song_a, 0, 100_000), (link, 100_000, 118_100), (song_b, 118_100, 300_000)],
@@ -183,490 +278,40 @@ def test_a_presenter_link_between_songs_survives(tmp_path):
     assert cleaned[1][2] - cleaned[1][1] == pytest.approx(18_100)
 
 
-# --- match offsets, retries, confidence, duration sanity -------------------
+# --- nothing may stand between a probe and the recogniser ------------------
 
 
-def test_confidence_rewards_margin_over_raw_score():
-    """A short probe of a long reference scores low even when unmistakable."""
-    from rockfm.analyzer import _confidence
-    from rockfm.fingerprint import Match
-
-    def match(score, margin):
-        return Match(track_id=1, key="k", kind="music", title="t", artist="a",
-                     votes=100, offset_frames=0, score=score, margin=margin)
-
-    decisive = _confidence(match(score=0.08, margin=40))   # few hashes, no rival
-    ambiguous = _confidence(match(score=0.30, margin=1.1))  # good score, close call
-    assert decisive > ambiguous
-
-
-def test_offset_start_is_ignored_without_an_anchored_reference(tmp_path):
-    """A song's first airing has nothing anchored to measure against."""
-    from rockfm.analyzer import Run
-
+def test_a_probe_always_reaches_the_recogniser(tmp_path):
+    """A cheap speech check sat here once and silently dropped whole songs."""
     analyzer = build(tmp_path)
-    track_id = analyzer.index.add(
-        kind="music", key="a|b", hashes=[(1, 0), (2, 1)], title="b", anchor_ms=1000
-    )
-    label = Label(key="a|b", artist="a", title="b", source="s",
-                  confidence=1.0, track_id=track_id)
-    run = Run(key="a|b", label=label, first_ms=0, last_ms=100_000)
-    samples = np.zeros(200 * RATE, dtype=np.float32)
-    assert analyzer._start_from_offsets(Window(0, 200_000, samples), run) is None
+    asked: list[int] = []
+    analyzer._external = lambda _w, at: asked.append(at)
+
+    analyzer._identify(window(), 60_000)
+    assert asked, "the probe never reached the recogniser"
 
 
-def test_replace_marks_a_reference_song_anchored(tmp_path):
-    analyzer = build(tmp_path)
-    track_id = analyzer.index.add(
-        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=1000
-    )
-    assert analyzer.index.get(track_id)["song_anchored"] == 0
-    analyzer.index.replace(track_id, [(1, 0), (2, 5)], anchor_ms=500, learned_ms=210_000)
-    row = analyzer.index.get(track_id)
-    assert row["song_anchored"] == 1
-    assert row["learned_ms"] == 210_000
-    assert row["anchor_ms"] == 500
-
-
-def test_a_probe_that_comes_back_empty_is_retried_elsewhere(tmp_path):
-    """The same song matches at one offset and misses at another."""
-    from rockfm.analyzer import RETRY_OFFSETS_MS
-    from rockfm.recognize.base import Recognition
-
+def test_a_miss_is_asked_again_before_the_stretch_is_written_off(tmp_path):
     analyzer = build(tmp_path)
     asked: list[int] = []
 
     def external(_window, at_ms):
         asked.append(at_ms)
-        if at_ms < RETRY_OFFSETS_MS[0]:
-            return None
-        return Recognition(artist="Blondie", title="Denis", provider="stub")
-
-    analyzer._external = external
-    analyzer._local = lambda *a, **k: None
-    samples = np.zeros(200 * RATE, dtype=np.float32)
-    found = analyzer._identify(Window(0, 200_000, samples), 0)
-
-    assert found is not None and found.title == "Denis"
-    assert len(asked) > 1, "gave up after a single miss"
-
-
-def test_items_are_published_during_the_scan_not_only_at_the_end(tmp_path, played):
-    """A cold window is minutes of throttled calls; waiting for all of them
-    meant an empty dashboard and then everything at once."""
-    analyzer = build(tmp_path)
-    seen_at_probe: list[int] = []
-    probes = {"n": 0}
-
-    def identify(_window, at_ms, **_kw):
-        probes["n"] += 1
-        name = song_at(played, at_ms)
-        if name is None:
-            return None
-        return Label(key=name, artist="x", title=name, source="stub",
-                     confidence=1.0, track_id=1)
-
-    analyzer._identify = identify
-    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at + PROBE_MS // 2) == key
-    analyzer._edge_match = lambda _w, at, key: song_at(played, at + BISECT_PROBE_MS // 2) == key
-    analyzer._enriched = lambda item: item
-    analyzer._relearn = lambda *a: None
-    analyzer._commit = lambda item: seen_at_probe.append(probes["n"])
-
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
-
-    assert seen_at_probe, "nothing was committed at all"
-    total = probes["n"]
-    assert min(seen_at_probe) < total, (
-        f"first item only appeared after every probe ({min(seen_at_probe)}/{total})"
-    )
-
-
-def test_progress_is_recorded_while_scanning(tmp_path, played):
-    analyzer = build(tmp_path)
-    analyzer._identify = lambda _w, at, **_kw: None
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
-
-    progress = db.get_meta(analyzer.conn, db.ANALYZER_PROGRESS_KEY)
-    done, total = progress.split("/")
-    assert int(done) == int(total) > 1
-
-
-def test_a_run_is_only_relearned_when_its_extent_changes(tmp_path, played):
-    """Planning runs after nearly every probe; re-fingerprinting minutes of
-    audio each time would cost more than the scan itself."""
-    analyzer = build(tmp_path)
-    relearns: list[tuple] = []
-
-    def identify(_window, at_ms, **_kw):
-        name = song_at(played, at_ms)
-        if name is None:
-            return None
-        return Label(key=name, artist="x", title=name, source="stub",
-                     confidence=1.0, track_id=1)
-
-    analyzer._identify = identify
-    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at + PROBE_MS // 2) == key
-    analyzer._edge_match = lambda _w, at, key: song_at(played, at + BISECT_PROBE_MS // 2) == key
-    analyzer._enriched = lambda item: item
-    analyzer._commit = lambda item: None
-    analyzer._relearn = lambda w, run, a, b: relearns.append((run.key, a, b))
-
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer.process_window(Window(0, MIN_WINDOW_MS, samples))
-
-    probes = analyzer._probe_count(Window(0, MIN_WINDOW_MS, samples))
-    # Unmemoised this is one per run per probe -- well over a hundred.
-    assert len(relearns) < probes / 2, f"{len(relearns)} relearns over {probes} probes"
-    # A growing run legitimately refreshes 0-84s, then 0-180s, and so on. What
-    # would be wasted work is relearning something an *earlier* pass already
-    # covered.
-    for index, (key, start, end) in enumerate(relearns):
-        already = [
-            (a, b) for k, a, b in relearns[:index]
-            if k == key and a <= start and b >= end
-        ]
-        assert not already, f"{key} {start}-{end} was already covered by {already}"
-
-
-def test_a_reference_is_never_replaced_with_a_shorter_one(tmp_path):
-    """Re-analysing must not erode what it already knows.
-
-    replace() clears a track's hashes before writing new ones, so learning a
-    coarse probe extent over a boundary-refined span loses coverage the edge
-    search depends on -- the song then measures shorter, and shorter again on
-    the next pass. Observed live: Fleetwood Mac went 173.9s, then 155.9s, with
-    the gap after it growing by exactly the difference.
-    """
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    label = Label(key="a|b", artist="a", title="b", source="s",
-                  confidence=1.0, track_id=0)
-    track_id = analyzer.index.add(
-        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=0
-    )
-    label = Label(key="a|b", artist="a", title="b", source="s",
-                  confidence=1.0, track_id=track_id)
-    run = Run(key="a|b", label=label, first_ms=0, last_ms=170_000)
-
-    # A good, refined reference: the whole song.
-    analyzer.index.replace(track_id, [(1, 0), (2, 10)], anchor_ms=0, learned_ms=174_000)
-    assert analyzer.index.get(track_id)["learned_ms"] == 174_000
-
-    # A later pass offers a shorter, coarser span. It must be refused.
-    attempted: list = []
-    analyzer._relearn = lambda w, r, a, b: attempted.append((a, b))
-    analyzer._learn_once(None, run, 0, 156_000)
-
-    assert attempted == [], "a shorter reference overwrote a longer one"
-    assert analyzer.index.get(track_id)["learned_ms"] == 174_000
-
-
-def test_a_longer_reference_still_wins(tmp_path):
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    track_id = analyzer.index.add(
-        kind="music", key="a|b", hashes=[(1, 0)], title="b", anchor_ms=0
-    )
-    analyzer.index.replace(track_id, [(1, 0)], anchor_ms=0, learned_ms=100_000)
-    label = Label(key="a|b", artist="a", title="b", source="s",
-                  confidence=1.0, track_id=track_id)
-    run = Run(key="a|b", label=label, first_ms=0, last_ms=200_000)
-
-    attempted: list = []
-    analyzer._relearn = lambda w, r, a, b: attempted.append((a, b))
-    analyzer._learn_once(None, run, 0, 210_000)
-    assert attempted == [(0, 210_000)]
-
-
-def test_a_run_reaches_past_the_coarse_grid(tmp_path, played):
-    """The scan asks every 24s, so a song's last matching probe can sit a full
-    step short of where it actually ends. Everything downstream inherits that."""
-    from rockfm.analyzer import EXTEND_STEP_MS, Run
-
-    analyzer = build(tmp_path)
-    # Extension asks the index, not the network: the reference is grounded from
-    # the run's own extent before the walk begins.
-    analyzer._same_track = lambda _w, at, key, s=0.0: song_at(played, at) == key
-    analyzer._ground_reference = lambda _w, _r: None
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
-
-    true_end = SONGS[0][1] * 1000
-    # A run that stopped short, as the 24s grid leaves it.
-    run = Run(key="foreigner", label=None, first_ms=0, last_ms=true_end - 20_000)
-    run.label = Label(key="foreigner", artist="x", title="t", source="s",
-                      confidence=1.0, track_id=1)
-
-    analyzer._extend_run(window, run)
-    assert run.last_ms > true_end - 20_000, "the run never reached out"
-    assert run.last_ms <= true_end, "it reached past the end of the song"
-    assert true_end - run.last_ms < EXTEND_STEP_MS + 1
-
-
-def test_a_miss_is_only_second_guessed_where_it_costs_something(tmp_path):
-    """Retrying a miss protects the scan, where one bad probe writes off 24s.
-
-    Elsewhere it just buys the same answer three times, so callers that expect
-    a miss can opt out.
-    """
-    analyzer = build(tmp_path)
-    analyzer._local = lambda _w, at, min_score=0.0: None
-
-    calls: list[int] = []
-
-    def external(_window, at_ms):
-        calls.append(at_ms)
         return None
 
     analyzer._external = external
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
+    assert analyzer._identify(window(), 60_000) is None
+    assert len(asked) > 1, "one miss condemned the whole stretch"
 
-    assert analyzer._identify(window, 60_000) is None
-    during_scan = len(calls)
-    assert during_scan > 1, "the scan should shift along and ask again"
-
-    calls.clear()
-    assert analyzer._identify(window, 60_000, retry=False) is None
-    assert len(calls) == 1
+    asked.clear()
+    assert analyzer._identify(window(), 60_000, retry=False) is None
+    assert len(asked) == 1
 
 
-def _extending(tmp_path, local_reaches_to, answer):
-    """A run being extended where the index stops answering partway out."""
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    calls: list[int] = []
-
-    def external(_window, at_ms):
-        calls.append(at_ms)
-        return answer
-
-    analyzer._external = external
-    analyzer._ground_reference = lambda _w, _r: None
-    analyzer._same_track = lambda _w, at, key, s=0.0: at <= local_reaches_to
-
-    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
-    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
-                      confidence=1.0, track_id=1)
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
-    return run, calls, analyzer
-
-
-def test_a_local_miss_at_an_edge_is_not_proof_the_song_ended(tmp_path):
-    """The index cannot speak for audio it was never taught.
-
-    Extension runs before the song is learned, so the reference is only the
-    probe that named it. Treating "the index has nothing to say" as "the song
-    stopped" put every edge short -- 25s off the end of a Def Leppard track --
-    and invented gaps between songs that actually abut.
-    """
-    from rockfm.recognize.base import Recognition
-
-    still_playing = Recognition(artist=ARTIST, title=TITLE, provider="stub")
-    run, calls, _ = _extending(tmp_path, local_reaches_to=300_000, answer=still_playing)
-
-    # The index gave up after the first step; the recogniser carried it further.
-    assert calls, "extension gave up the moment the index ran out of reference"
-    assert run.last_ms > 306_000
-
-
-def test_an_edge_cannot_spend_more_than_its_budget(tmp_path):
-    """Bounded, because the old unbounded version cost eight calls a song.
-
-    The index answers nowhere here and the recogniser always says yes, so
-    extension would walk to its full limit in both directions if nothing
-    stopped it. What stops it is the budget, and this pins the exact number.
-    """
-    from rockfm.analyzer import EXTEND_EXTERNAL_BUDGET
-    from rockfm.recognize.base import Recognition
-
-    still_playing = Recognition(artist=ARTIST, title=TITLE, provider="stub")
-    run, calls, _ = _extending(tmp_path, local_reaches_to=-1, answer=still_playing)
-
-    assert len(calls) == EXTEND_EXTERNAL_BUDGET * 2, calls
-    # It really did move both edges out on those answers.
-    assert run.last_ms > 300_000 and run.first_ms < 300_000
-
-
-def test_a_failing_recogniser_is_not_asked_to_extend(tmp_path):
-    """A dead service must not be consulted twice per song, per window."""
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    calls: list[int] = []
-    analyzer._external = lambda _w, at: calls.append(at)
-    analyzer._ground_reference = lambda _w, _r: None
-    analyzer._same_track = lambda _w, at, key, s=0.0: False
-    analyzer._recognizer_degraded = lambda: True
-
-    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
-    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
-                      confidence=1.0, track_id=1)
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
-
-    assert calls == []
-
-
-def test_a_presenter_over_the_outro_does_not_end_the_song(tmp_path):
-    """Nothing may stand between a probe and the recogniser.
-
-    A cheap speech check once did, and on a track the recogniser names at every
-    offset it called the intro and the outro speech -- the exact audio the
-    edges are decided from. A probe it dropped was a song nobody heard about.
-    """
-    from rockfm.analyzer import Run
-    from rockfm.recognize.base import Recognition
-
-    analyzer = build(tmp_path)
-    calls: list[int] = []
-
-    def external(_window, at_ms):
-        calls.append(at_ms)
-        return Recognition(artist=ARTIST, title=TITLE, provider="stub")
-
-    analyzer._external = external
-    analyzer._ground_reference = lambda _w, _r: None
-    analyzer._same_track = lambda _w, at, key, s=0.0: False
-
-    run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
-    run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
-                      confidence=1.0, track_id=1)
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer._extend_run(Window(0, MIN_WINDOW_MS, samples), run)
-
-    assert calls, "extension stopped at the talk-over instead of asking"
-    assert run.last_ms > 300_000
-
-
-def test_the_budget_can_reach_the_extension_limit(tmp_path):
-    """A budget smaller than the limit silently becomes the limit.
-
-    Grounding covers one probe past the last match, and a probe starting there
-    already reaches beyond it -- so the index answers for a step at most and
-    the budget does the rest of the walking. Set below LIMIT/STEP it stops the
-    walk early, which is how a song ended thirteen seconds short on a budget
-    worth twelve.
-    """
-    from rockfm.analyzer import (
-        EXTEND_EXTERNAL_BUDGET,
-        EXTEND_LIMIT_MS,
-        EXTEND_STEP_MS,
-    )
-
-    assert EXTEND_EXTERNAL_BUDGET * EXTEND_STEP_MS >= EXTEND_LIMIT_MS
-
-
-def test_an_edge_records_why_it_stopped(tmp_path):
-    """The finished timeline cannot distinguish "the song ended" from "we ran
-    out of ways to ask", and that difference is exactly what goes wrong."""
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    analyzer._ground_reference = lambda _w, _r: None
-    analyzer._external = lambda _w, at: None
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
-
-    def extend(same_track, degraded=False):
-        run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
-        run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
-                          confidence=1.0, track_id=1)
-        analyzer._same_track = same_track
-        analyzer._recognizer_degraded = lambda: degraded
-        analyzer._extend_run(window, run)
-        return run
-
-    # Nothing there, and the recogniser agrees.
-    assert extend(lambda _w, at, key, s=0.0: False).end_stopped == "nothing there"
-
-    # A recogniser that is down must not read as a song that ended.
-    assert extend(
-        lambda _w, at, key, s=0.0: False, degraded=True
-    ).end_stopped == "recogniser down"
-
-    # Walked the whole way and was still going.
-    assert extend(lambda _w, at, key, s=0.0: True).end_stopped == "limit"
-
-
-def test_a_local_miss_always_reaches_the_recogniser(tmp_path):
-    """Nothing may sit between a probe and the recogniser.
-
-    A cheap speech check sat there once, to save calls on presenter talk. On a
-    Mr. Big track the recogniser names at every offset, it read two probes as
-    speech -- ratios of 0.88 and 1.00 -- and they were the intro and the outro,
-    the audio the edges are decided from. Meanwhile the analyzer filed ninety
-    five seconds of that song as a gap. Anything that can silently drop a probe
-    can silently drop a song.
-    """
-    analyzer = build(tmp_path)
-    analyzer._local = lambda _w, at, min_score=0.0: None
-
-    asked: list[int] = []
-    analyzer._external = lambda _w, at: asked.append(at)
-
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    analyzer._identify(Window(0, MIN_WINDOW_MS, samples), 60_000)
-
-    assert asked, "a probe the index could not name never reached the recogniser"
-
-
-def test_nothing_imports_a_speech_segmenter() -> None:
-    """The module is gone; an import would mean the gate is creeping back."""
+def test_nothing_imports_a_fingerprint_index() -> None:
+    """Both modules are gone; an import means the old design is creeping back."""
     import importlib
 
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("rockfm.classify.segmenter")
-
-
-def test_planning_twice_does_not_extend_twice(tmp_path):
-    """Planning repeats after almost every probe; extension must not.
-
-    Each edge is eight local matches, and with a fully learned index those are
-    not cheap. Re-running them for every run on every probe cost eighty seconds
-    per probe against twenty-four seconds of audio -- a third of real time,
-    losing ground against the stream feeding it. The answer cannot change
-    unless the run's raw extent has.
-    """
-    from rockfm.analyzer import Run
-
-    analyzer = build(tmp_path)
-    analyzer._ground_reference = lambda _w, _r: None
-    analyzer._same_track = lambda _w, at, key, s=0.0: at <= 306_000
-    analyzer._external = lambda _w, at: None
-
-    calls: list[int] = []
-    real = analyzer._extend_run
-    analyzer._extend_run = lambda w, r: (calls.append(r.first_ms), real(w, r))[1]
-
-    samples = np.zeros(int(MIN_WINDOW_MS / 1000 * RATE), dtype=np.float32)
-    window = Window(0, MIN_WINDOW_MS, samples)
-
-    def fresh():
-        run = Run(key=KEY, label=None, first_ms=300_000, last_ms=300_000)
-        run.label = Label(key=KEY, artist=ARTIST, title=TITLE, source="s",
-                          confidence=1.0, track_id=1)
-        return run
-
-    first = fresh()
-    analyzer._extend(window, first)
-    assert len(calls) == 1
-
-    # The same raw extent, planned again: recalled, not recomputed.
-    again = fresh()
-    analyzer._extend(window, again)
-    assert len(calls) == 1, "extension repeated for an extent already walked"
-    assert (again.first_ms, again.last_ms) == (first.first_ms, first.last_ms)
-
-    # A run that actually grew is a different question, and gets asked.
-    grown = fresh()
-    grown.last_ms = 324_000
-    analyzer._extend(window, grown)
-    assert len(calls) == 2
+    for name in ("rockfm.fingerprint", "rockfm.seed", "rockfm.classify.segmenter"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(name)

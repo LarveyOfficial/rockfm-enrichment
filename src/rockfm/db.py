@@ -65,33 +65,6 @@ CREATE TABLE IF NOT EXISTS timeline (
 );
 CREATE INDEX IF NOT EXISTS idx_timeline_start ON timeline(start_ms);
 
-CREATE TABLE IF NOT EXISTS fp_tracks (
-    id          INTEGER PRIMARY KEY,
-    kind        TEXT NOT NULL,      -- 'music' (songs) | 'nonmusic' (ads, jingles, sweepers)
-    key         TEXT NOT NULL UNIQUE,
-    title       TEXT,
-    artist      TEXT,
-    source      TEXT,               -- preview|broadcast
-    occurrences INTEGER NOT NULL DEFAULT 0,
-    duration_ms INTEGER,            -- release length, from iTunes/Deezer
-    anchor_ms   INTEGER,            -- broadcast ms corresponding to reference offset 0
-    -- 1 once the reference spans a whole aired song anchored at its start, which
-    -- is what makes a match offset mean "elapsed within the song".
-    song_anchored INTEGER NOT NULL DEFAULT 0,
-    learned_ms  INTEGER,            -- length of the span actually learned
-    last_seen_ms INTEGER,           -- when this was last heard on air
-    created_ms  INTEGER NOT NULL,
-    updated_ms  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_fp_tracks_kind ON fp_tracks(kind);
-
-CREATE TABLE IF NOT EXISTS fp_hashes (
-    hash     INTEGER NOT NULL,
-    offset   INTEGER NOT NULL,
-    track_id INTEGER NOT NULL REFERENCES fp_tracks(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_fp_hashes_hash ON fp_hashes(hash);
-CREATE INDEX IF NOT EXISTS idx_fp_hashes_track ON fp_hashes(track_id);
 
 CREATE TABLE IF NOT EXISTS song_meta (
     key         TEXT PRIMARY KEY,   -- catalog_key(artist, title)
@@ -119,9 +92,6 @@ CREATE TABLE IF NOT EXISTS meta (
 # listed here as well as in SCHEMA above, or an upgrade silently keeps the old
 # shape and the new code fails on a missing column.
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
-    ("fp_tracks", "song_anchored", "INTEGER NOT NULL DEFAULT 0"),
-    ("fp_tracks", "learned_ms", "INTEGER"),
-    ("fp_tracks", "last_seen_ms", "INTEGER"),
 )
 
 

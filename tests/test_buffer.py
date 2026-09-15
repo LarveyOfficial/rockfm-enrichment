@@ -63,9 +63,8 @@ def test_gap_detection(tmp_path):
     assert not reader.has_gap(2_000_000, 2_100_000)
 
 
-def test_pruning_drops_segments_and_their_timeline_but_keeps_fingerprints(tmp_path):
-    """Learned fingerprints must outlive the audio they came from."""
-    from rockfm.fingerprint import FingerprintIndex
+def test_pruning_drops_segments_and_their_timeline(tmp_path):
+    """Audio ages out of the buffer, and what was said about it goes with it."""
     from rockfm.ingest import Ingestor
 
     config = Config(data_dir=tmp_path, buffer_hours=1)
@@ -83,7 +82,6 @@ def test_pruning_drops_segments_and_their_timeline_but_keeps_fingerprints(tmp_pa
         )
     db.upsert_timeline(conn, {"start_ms": old, "end_ms": old + 6000, "kind": "cancion"}, 0)
     db.upsert_timeline(conn, {"start_ms": recent, "end_ms": recent + 6000, "kind": "cancion"}, 0)
-    FingerprintIndex(conn).add(kind="music", key="a|b", hashes=[(1, 0), (2, 1)], title="b")
 
     removed = Ingestor(config, database).prune()
 
@@ -92,7 +90,6 @@ def test_pruning_drops_segments_and_their_timeline_but_keeps_fingerprints(tmp_pa
     assert (config.segments_dir / "new.aac").exists()
     assert db.segment_count(conn) == 1
     assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM fp_hashes").fetchone()[0] == 2
 
 
 def test_timeline_upsert_replaces_overlapping_rows_atomically(tmp_path):

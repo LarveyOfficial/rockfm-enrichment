@@ -26,7 +26,7 @@ def build(tmp_path):
 
 
 def _run(key="song", first=0, last=100_000):
-    label = Label(key=key, artist="a", title="t", source="s", confidence=1.0, track_id=1)
+    label = Label(key=key, artist="a", title="t", source="s", confidence=1.0)
     return Run(key=key, label=label, first_ms=first, last_ms=last)
 
 
@@ -234,14 +234,36 @@ def test_audio_nobody_could_ask_about_is_held_not_named(tmp_path):
 
 
 def test_the_same_audio_is_named_when_the_recogniser_was_working(tmp_path):
-    """Held only while we could not ask. Having asked, an empty answer is real."""
-    analyzer = _unidentifiable(tmp_path, degraded=False)
+    """Held only while we could not ask. Having asked, an empty answer is real.
+
+    The gap needs a song after it to be finished with: a stretch still running
+    to the window edge is still growing, whatever the recogniser is doing.
+    """
+    from rockfm.analyzer import STEP_MS, Label
+
+    analyzer = build(tmp_path)
+    analyzer._recognizer_degraded = lambda: False
+    analyzer._programme = lambda _at: None
+    analyzer._enriched = lambda item: item
+    song_from = 600_000
+
+    def identify(_w, at, **_kw):
+        if at < song_from:
+            return None
+        return Label(key="k", artist="Mr. Big", title="To Be with You",
+                     source="shazamio", confidence=1.0, started_ms=song_from)
+
+    analyzer._identify = identify
     window = _window_of_silence()
+    analyzer.process_window(window)
 
-    position = analyzer.process_window(window)
-
-    assert analyzer.conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] > 0
-    assert position > window.start_ms
+    kinds = [
+        row["kind"]
+        for row in analyzer.conn.execute("SELECT * FROM timeline ORDER BY start_ms")
+    ]
+    assert kinds, "nothing was written for audio the recogniser did answer for"
+    assert S.KIND_DESCONOCIDO in kinds or S.KIND_PROGRAMA in kinds
+    assert STEP_MS > 0
 
 
 # --- one airing that came back under two names ------------------------------

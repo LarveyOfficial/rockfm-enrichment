@@ -62,10 +62,6 @@
           Type="Variable" Display="advanced" Required="false" Mask="false">shazamio</Config>
 
 
-  <Config Name="Seed On Start" Target="SEED_ON_START" Default="true"
-          Description="Build the fingerprint index from RockFM's rotation catalog on first run. Takes about 20 minutes in the background and only happens once."
-          Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
-
 
 
 

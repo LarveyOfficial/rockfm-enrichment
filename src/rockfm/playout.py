@@ -287,9 +287,6 @@ class Playout:
             "songs": self.conn.execute(
                 "SELECT COUNT(*) FROM timeline WHERE kind = ?", (S.KIND_CANCION,)
             ).fetchone()[0],
-            "learned_songs": self.conn.execute(
-                "SELECT COUNT(*) FROM fp_tracks WHERE kind = 'music'"
-            ).fetchone()[0],
         }
 
         recognizer_raw = db.get_meta(self.conn, db.RECOGNIZER_STATE_KEY)
@@ -515,9 +512,9 @@ def create_app(config: Config | None = None) -> FastAPI:
 
         Its cursor only moves forward, so a fix to how audio is interpreted
         never reaches anything already scanned. Clearing the cursor re-runs the
-        whole buffer without touching the fingerprint index, so nothing learned
-        or seeded is lost -- and with a warm index most of it resolves locally,
-        which makes a second pass far quicker than the first.
+        Every stretch is identified again from the recogniser, which is the
+        only thing that identifies anything now, so a second pass costs what the
+        first did.
         """
         state.conn.execute(
             "DELETE FROM meta WHERE key = ?", (db.ANALYZER_CURSOR_KEY,)

@@ -134,6 +134,15 @@ def _parse(payload: dict[str, Any] | None) -> Recognition | None:
         track.get("images") or {}
     ).get("coverart")
 
+    match = (payload.get("matches") or [{}])[0]
+    offset = match.get("offset")
+
     return Recognition(
-        artist=artist, title=title, album=album, art_url=art, provider="shazamio"
+        artist=artist,
+        title=title,
+        album=album,
+        art_url=art,
+        provider="shazamio",
+        offset_seconds=float(offset) if isinstance(offset, (int, float)) else None,
+        track_id=str(track.get("key")) if track.get("key") else None,
     )

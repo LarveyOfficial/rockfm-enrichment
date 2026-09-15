@@ -20,7 +20,7 @@ WORKDIR /app
 # application does not reinstall them on every rebuild.
 RUN pip install --no-cache-dir \
       "httpx>=0.27" "fastapi>=0.115" "uvicorn[standard]>=0.32" \
-      "numpy>=1.26" "scipy>=1.12" shazamio
+      "numpy>=1.26" shazamio
 
 COPY pyproject.toml ./
 COPY src ./src

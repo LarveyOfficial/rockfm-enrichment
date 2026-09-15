@@ -56,6 +56,7 @@ from .config import Config
 from .enrich import Enricher
 from .recognize import Recognition
 from .recognize import build as build_recognizer
+from .recognize.base import SAFE_MIN_INTERVAL
 from .rockfm_api import RockFmApi, catalog_key
 from .schedule import Schedule
 from .timeshift import target_delay_seconds
@@ -247,6 +248,9 @@ class Analyzer:
     def _recognizer_degraded(self) -> bool:
         return bool(getattr(self.recognizer, "degraded", False))
 
+    def _last_call_failed(self) -> bool:
+        return bool(getattr(self.recognizer, "last_failed", False))
+
     def _publish_recognizer_state(self) -> None:
         """Say how the recogniser is doing, where another process can see it.
 
@@ -276,7 +280,12 @@ class Analyzer:
         """Pick up the configured call interval without a restart."""
         if not hasattr(self.recognizer, "min_interval"):
             return
-        wanted = float(settings.load(self.conn)["recognizer_interval_seconds"])
+        # The setting can slow lookups down but not push them past the rate
+        # Shazam was measured to tolerate; below that it answers 429.
+        wanted = max(
+            float(settings.load(self.conn)["recognizer_interval_seconds"]),
+            SAFE_MIN_INTERVAL,
+        )
         if wanted != self.recognizer.min_interval:
             log.info("external lookups now paced at %.0fs apart", wanted)
             self.recognizer.min_interval = wanted
@@ -478,7 +487,15 @@ class Analyzer:
         """
         asked_at = at_ms
         found = self._external(window, at_ms)
-        if found is None and retry and not self._recognizer_degraded():
+        # Only a miss is worth a second opinion. A call that raised was refused,
+        # and asking twice more at shifted offsets turns one refusal into three
+        # -- which is how 24 probes became 57 calls the moment Shazam said 429.
+        if (
+            found is None
+            and retry
+            and not self._recognizer_degraded()
+            and not self._last_call_failed()
+        ):
             # A probe that straddles a change matches neither side. Shift along
             # and ask again before writing the stretch off.
             for shift in RETRY_OFFSETS_MS:

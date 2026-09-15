@@ -54,16 +54,20 @@ class Recognizer(Protocol):
 
 
 # Seconds between calls when the recogniser is healthy. See
-# `settings.recognizer_interval_seconds`, which overrides this at runtime.
+# `settings.recognizer_interval_seconds`, which can raise this but not lower it
+# below SAFE_MIN_INTERVAL.
 #
-# Small, and measured rather than guessed. Unpaced, the analyzer makes about
-# nine calls a second and Shazam starts returning throttle pages instead of
-# JSON within seconds; probed by hand at roughly one a second it answered
-# thirty-six times out of thirty-six. A third of a second keeps a full window
-# under a minute of lookups -- against twenty minutes of audio -- while staying
-# far away from the rate that breaks it. An earlier twelve seconds here was the
-# single largest cost in a scan; this is not that.
-DEFAULT_MIN_INTERVAL = 0.35
+# Measured against Shazam's live endpoint: one call every four seconds ran
+# forty-five out of forty-five, starting straight after a burst had been
+# refused. The analyzer at roughly one call every two seconds drew HTTP 429
+# within two minutes. Four seconds is still six times real time, because each
+# call covers twenty-four seconds of audio.
+SAFE_MIN_INTERVAL = 4.0
+DEFAULT_MIN_INTERVAL = SAFE_MIN_INTERVAL
+
+# How long to wait after Shazam says 429. It is refusing on purpose, so the
+# ordinary one-two-four second backoff just spends the next refusal sooner.
+RATE_LIMIT_BACKOFF_SECONDS = 30.0
 
 # Consecutive failures before the external recogniser is left alone entirely.
 # Counted against real backoff, so reaching this takes half a minute of trying
@@ -125,18 +129,28 @@ class Throttled:
         self._consecutive_errors = 0
         self.calls = 0
         self.skipped = 0
+        # Whether the most recent call raised, rather than answered.
+        self.last_failed = False
 
     @property
     def degraded(self) -> bool:
-        """True only when the recogniser is not being consulted at all.
+        """True only while the breaker is open and its cool-off has not run out.
 
-        Not merely "the last call failed". Callers use this to decide whether a
-        silence means the audio holds no song or that nobody asked, and a single
-        transient failure -- Shazam handing back a throttle page instead of JSON
-        -- is not that. Treating one blip as an outage held seventeen minutes of
-        audio, including a song the recogniser names at every offset.
+        Callers read this as "nobody is being asked", and the analyzer stops
+        probing when it sees it. It used to mean "six failures in a row" and
+        nothing else -- and the only thing that clears the count is a call that
+        succeeds, which a caller that has stopped probing never makes. So the
+        first rate limit of the night became permanent: twenty-eight calls, then
+        ten hours of an analyzer waiting for a recogniser it would not ask.
+        Tying it to the cool-off means it ends, the next probe goes out, and
+        that probe either clears the count or opens the breaker again.
         """
-        return self._consecutive_errors >= self.open_after
+        import time
+
+        return (
+            self._consecutive_errors >= self.open_after
+            and time.monotonic() < self._next_allowed
+        )
 
     def recognize(self, samples: np.ndarray, rate: int) -> Recognition | None:
         import time
@@ -157,15 +171,17 @@ class Throttled:
             time.sleep(min(wait, self.max_backoff))
 
         self.calls += 1
+        self.last_failed = False
         try:
             result = self.inner.recognize(samples, rate)
         except Exception as exc:
             self._consecutive_errors += 1
+            self.last_failed = True
             if self._consecutive_errors >= self.open_after:
                 log.error(
                     "%s has failed %d times in a row (%s); leaving it alone for"
-                    " %.0f min and relying on the local index",
-                    self.name, self._consecutive_errors, exc, self.cool_off / 60,
+                    " %.0f min",
+                    self.name, self._consecutive_errors, _describe(exc), self.cool_off / 60,
                 )
                 self._next_allowed = time.monotonic() + self.cool_off
             else:
@@ -173,7 +189,9 @@ class Throttled:
                     BACKOFF_BASE_SECONDS * 2 ** (self._consecutive_errors - 1),
                     self.max_backoff,
                 )
-                log.warning("recogniser error (%s); backing off %.0fs", exc, delay)
+                if _rate_limited(exc):
+                    delay = max(delay, RATE_LIMIT_BACKOFF_SECONDS)
+                log.warning("recogniser error (%s); backing off %.0fs", _describe(exc), delay)
                 self._next_allowed = time.monotonic() + delay
             return None
 
@@ -185,6 +203,25 @@ class Throttled:
 
     def close(self) -> None:
         self.inner.close()
+
+
+def _rate_limited(exc: BaseException) -> bool:
+    """Did the service refuse on purpose?
+
+    ShazamIO parses every response as JSON, so a 429 arrives as "Failed to
+    decode json" -- the throttle page is HTML -- with the HTTP error attached as
+    its cause. Reading the message alone, a deliberate refusal looks like noise.
+    """
+    seen = exc
+    while seen is not None:
+        if getattr(seen, "status", None) == 429:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _describe(exc: BaseException) -> str:
+    return "rate limited, HTTP 429" if _rate_limited(exc) else str(exc)
 
 
 class NullRecognizer:

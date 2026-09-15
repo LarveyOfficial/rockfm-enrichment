@@ -388,3 +388,35 @@ def test_a_real_break_after_a_song_stays_a_break(tmp_path):
 
     assert placed["a"][1] == 96_000 + PROBE_MS, "the end was stretched over a break"
     assert None in placed, "the break between them was swallowed"
+
+
+# --- not making a rate limit worse -----------------------------------------
+
+
+def test_a_refused_call_is_not_retried_at_shifted_offsets(tmp_path):
+    """One refusal must stay one call. Retrying it made 24 probes into 57 calls."""
+    analyzer = build(tmp_path)
+    analyzer.recognizer = type(
+        "Refusing", (), {"degraded": False, "last_failed": True}
+    )()
+    asked: list[int] = []
+    analyzer._external = lambda _w, at: asked.append(at)
+
+    assert analyzer._identify(window(), 60_000) is None
+    assert asked == [60_000]
+
+
+def test_pacing_is_never_set_below_the_rate_shazam_tolerates(tmp_path):
+    from rockfm import settings
+    from rockfm.recognize.base import SAFE_MIN_INTERVAL, Throttled
+
+    analyzer = build(tmp_path)
+    analyzer.recognizer = Throttled(NullRecognizer(), min_interval=0.0)
+    settings.save(analyzer.conn, {"recognizer_interval_seconds": 0.35})
+
+    analyzer._pace_recognizer()
+    assert analyzer.recognizer.min_interval == SAFE_MIN_INTERVAL
+
+    settings.save(analyzer.conn, {"recognizer_interval_seconds": 10.0})
+    analyzer._pace_recognizer()
+    assert analyzer.recognizer.min_interval == 10.0, "slowing down must still work"

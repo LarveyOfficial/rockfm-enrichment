@@ -176,3 +176,64 @@ def test_recovery_clears_the_penalty() -> None:
     throttled._next_allowed = 0.0
     assert throttled.recognize(np.zeros(8), 8000) is inner.outcome
     assert not throttled.degraded
+
+
+# --- the night the breaker never closed ------------------------------------
+
+
+def _refused(status: int = 429) -> Exception:
+    """What ShazamIO actually raises for a 429: a decode error caused by it."""
+    cause = type("ContentTypeError", (Exception,), {"status": status})("429 text/html")
+    err = RuntimeError("Failed to decode json")
+    err.__cause__ = cause
+    return err
+
+
+def test_an_open_breaker_closes_again_once_it_has_cooled_off() -> None:
+    """Degraded has to end, or nobody ever asks again.
+
+    It used to mean "six failures in a row", and only a successful call clears
+    that count -- a call the analyzer stops making the moment it sees degraded.
+    Twenty-eight calls, then ten hours of waiting on a recogniser nobody asked.
+    """
+    inner = _Recorder(TimeoutError("no answer"))
+    throttled = Throttled(inner, min_interval=0.0, open_after=2, cool_off=0.05)
+    for _ in range(2):
+        throttled._next_allowed = 0.0
+        throttled.recognize(np.zeros(8), 8000)
+    assert throttled.degraded
+
+    time.sleep(0.1)
+    assert not throttled.degraded, "the breaker stayed open after its cool-off"
+
+    inner.outcome = Recognition(artist="ZZ Top", title="Gimme All Your Lovin'")
+    assert throttled.recognize(np.zeros(8), 8000) is inner.outcome
+    assert throttled._consecutive_errors == 0
+
+
+def test_a_rate_limit_is_recognised_under_its_disguise() -> None:
+    from rockfm.recognize.base import _describe, _rate_limited
+
+    assert _rate_limited(_refused(429))
+    assert _describe(_refused(429)) == "rate limited, HTTP 429"
+    assert not _rate_limited(_refused(500))
+    assert not _rate_limited(TimeoutError("no answer"))
+
+
+def test_a_rate_limit_backs_off_longer_than_a_blip() -> None:
+    """Shazam refusing on purpose is not helped by asking again in a second."""
+    from rockfm.recognize.base import RATE_LIMIT_BACKOFF_SECONDS
+
+    throttled = Throttled(_Recorder(_refused(429)), min_interval=0.0, open_after=10)
+    throttled.recognize(np.zeros(8), 8000)
+    assert throttled._next_allowed - time.monotonic() >= RATE_LIMIT_BACKOFF_SECONDS - 1
+
+
+def test_last_failed_tells_a_refusal_from_a_miss() -> None:
+    failing = Throttled(_Recorder(TimeoutError("no answer")), min_interval=0.0)
+    failing.recognize(np.zeros(8), 8000)
+    assert failing.last_failed
+
+    missing = Throttled(_Recorder(None), min_interval=0.0)
+    missing.recognize(np.zeros(8), 8000)
+    assert not missing.last_failed

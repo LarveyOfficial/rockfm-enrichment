@@ -10,12 +10,17 @@ That endpoint routes to Liquidsoap's `custom_metadata.insert`, so the station
 must have a Liquidsoap backend -- a relay-only station has no backend adapter
 and the call fails. The API key needs the station's "Broadcasting" permission.
 
-On artwork: AzuraCast passes every parameter of that request through to a
-Liquidsoap annotation, so we also send `art`. Whether it survives into
-AzuraCast's now-playing feedback depends on the version, and it is harmless if
-it does not -- AzuraCast then resolves art through its own Last.fm/MusicBrainz
-services, and our own now-playing API carries the official RockFM artwork
-regardless. `probe_art_support()` reports which of the two is happening.
+On artwork: it cannot be sent this way, on any version. AzuraCast filters the
+request's parameters against `AnnotateNextSong::ALLOWED_ANNOTATIONS` before
+building the annotation, and that list holds `title`, `artist`, `duration`,
+various ids and cue points -- no `art`, no `album`. Both are dropped without a
+word, which is why a station fed by this shows the right song, an empty album
+and the wrong picture.
+
+We send them anyway: they cost nothing, and a later version that widens the
+list would start working on its own. Meanwhile AzuraCast resolves covers from
+the artist and title we do send, and our own now-playing API carries the
+official RockFM artwork regardless.
 """
 
 from __future__ import annotations
@@ -170,23 +175,6 @@ class MetadataClient:
         except httpx.HTTPError as exc:
             log.warning("could not read AzuraCast now-playing: %s", exc)
             return None
-
-    def probe_art_support(self, metadata: Metadata) -> bool | None:
-        """Push metadata with art, then check whether AzuraCast kept our URL."""
-        if not (metadata.art and self.push(metadata)):
-            return None
-        time.sleep(3)
-        payload = self.now_playing()
-        if not payload:
-            return None
-        art = ((payload.get("now_playing") or {}).get("song") or {}).get("art")
-        kept = bool(art and metadata.art.split("/")[-1] in str(art))
-        log.info(
-            "AzuraCast %s our artwork (reported art: %s)",
-            "kept" if kept else "replaced",
-            art,
-        )
-        return kept
 
     def close(self) -> None:
         self.client.close()

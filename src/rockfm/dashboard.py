@@ -422,11 +422,9 @@ const SETTING_LABELS = {
   azuracast_base_url: 'AzuraCast base URL',
   azuracast_station_id: 'Station ID',
   azuracast_api_key: 'API key',
-  azuracast_dj_url: 'DJ URL',
-  azuracast_dj_password: 'DJ password',
 };
 const AZURACAST_FIELDS = ['azuracast_enabled', 'azuracast_base_url', 'azuracast_station_id',
-                          'azuracast_api_key', 'azuracast_dj_url', 'azuracast_dj_password'];
+                          'azuracast_api_key'];
 
 async function loadSettings() {
   const data = await (await fetch('/api/settings', {cache:'no-store'})).json();

@@ -1,10 +1,10 @@
 """Feed the delayed stream and its metadata into AzuraCast.
 
-Two independent jobs:
+One job: at each boundary, POST /api/station/{id}/nowplaying/update.
 
-  audio     ffmpeg reads our local delayed HLS and connects to AzuraCast's
-            DJ/streamer port as an Icecast source.
-  metadata  at each boundary, POST /api/station/{id}/nowplaying/update.
+The audio reaches AzuraCast on its own -- point the station at our stream as a
+remote source. We used to push it as a DJ/streamer connection too, which made
+AzuraCast treat the station as live and ignore what we said about it.
 
 That endpoint routes to Liquidsoap's `custom_metadata.insert`, so the station
 must have a Liquidsoap backend -- a relay-only station has no backend adapter
@@ -21,10 +21,8 @@ regardless. `probe_art_support()` reports which of the two is happening.
 from __future__ import annotations
 
 import logging
-import shutil
 import signal
 import sqlite3
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -194,89 +192,6 @@ class MetadataClient:
         self.client.close()
 
 
-class SourcePusher:
-    """Keeps an ffmpeg process shipping our delayed HLS to AzuraCast.
-
-    Watches the settings: switching the integration off stops the source, and
-    switching it on starts one, without restarting the container.
-    """
-
-    def __init__(self, config: Config, database: db.ThreadLocalDB) -> None:
-        self.config = config
-        self._db = database
-        self.stop_event = threading.Event()
-        self._process: subprocess.Popen | None = None
-
-    @property
-    def settings(self) -> dict:
-        return settings.load(self._db.conn)
-
-    @property
-    def configured(self) -> bool:
-        current = self.settings
-        return bool(
-            current["azuracast_enabled"]
-            and current["azuracast_dj_url"]
-            and current["azuracast_dj_password"]
-        )
-
-    def _source_url(self, current: dict) -> str:
-        # icecast://source:password@host:port/mount
-        target = current["azuracast_dj_url"]
-        scheme, _, rest = target.partition("://")
-        if not rest:
-            rest, scheme = scheme, "icecast"
-        return f"icecast://source:{current['azuracast_dj_password']}@{rest}"
-
-    def command(self) -> list[str]:
-        local = f"http://127.0.0.1:{self.config.http_port}/hls/playlist.m3u8"
-        codec = (self.config.azuracast_dj_codec or "mp3").lower()
-        args = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
-            "-re", "-reconnect", "1", "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "10", "-i", local,
-        ]
-        if codec == "copy":
-            args += ["-c:a", "copy", "-content_type", "audio/aac", "-f", "adts"]
-        else:
-            args += [
-                "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-                "-content_type", "audio/mpeg", "-f", "mp3",
-            ]
-        return args + [self._source_url(self.settings)]
-
-    def run(self) -> None:
-        announced = False
-        while not self.stop_event.is_set():
-            if not self.configured:
-                if not announced:
-                    log.info("AzuraCast audio push is off; waiting for it to be enabled")
-                    announced = True
-                self.stop_event.wait(POLL_SECONDS * 2)
-                continue
-
-            announced = False
-            log.info("connecting to AzuraCast as a live source")
-            try:
-                self._process = subprocess.Popen(self.command())
-                while self._process.poll() is None:
-                    if self.stop_event.is_set() or not self.configured:
-                        log.info("AzuraCast audio push disabled; disconnecting")
-                        self._process.terminate()
-                        break
-                    self.stop_event.wait(POLL_SECONDS)
-            except Exception as exc:
-                log.warning("source push failed: %s", exc)
-            if self.stop_event.is_set():
-                break
-            self.stop_event.wait(RESTART_DELAY)
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        if self._process and self._process.poll() is None:
-            self._process.terminate()
-
-
 def station_metadata() -> Metadata:
     """What to leave on the station when we stop driving its metadata.
 
@@ -352,25 +267,16 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = Config()
     config.ensure_dirs()
-    if not shutil.which("ffmpeg"):
-        log.error("ffmpeg not found on PATH")
-
     database = db.ThreadLocalDB(config.db_path)
     bridge = MetadataBridge(config, database)
-    pusher = SourcePusher(config, database)
 
     def handle(signum, _frame):
         log.info("signal %s received; shutting down", signum)
         bridge.stop_event.set()
-        pusher.stop()
 
     signal.signal(signal.SIGTERM, handle)
     signal.signal(signal.SIGINT, handle)
-
-    threading.Thread(target=bridge.run, daemon=True).start()
-    pusher.run()
-    while not bridge.stop_event.is_set():
-        time.sleep(1)
+    bridge.run()
 
 
 if __name__ == "__main__":

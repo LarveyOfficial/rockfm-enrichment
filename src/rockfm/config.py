@@ -76,7 +76,6 @@ class Config:
     # Only the codec stays here: changing it means restarting the ffmpeg source
     # anyway. Everything else about the integration -- including whether it runs
     # at all -- is a runtime setting, see settings.py.
-    azuracast_dj_codec: str = field(default_factory=lambda: _env("AZURACAST_DJ_CODEC", "mp3"))
 
     @property
     def source_tz(self) -> ZoneInfo:

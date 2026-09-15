@@ -66,8 +66,4 @@
 
 
 
-
-  <Config Name="AzuraCast DJ Codec" Target="AZURACAST_DJ_CODEC" Default="mp3"
-          Description="mp3 re-encodes at 192k and is the safest. copy passes the original AAC through untouched, if your harbour accepts it."
-          Type="Variable" Display="advanced" Required="false" Mask="false">mp3</Config>
 </Container>

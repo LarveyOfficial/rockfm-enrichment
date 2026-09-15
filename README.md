@@ -27,7 +27,7 @@ RockFM HLS ──► ingest ──► 24h buffer on disk (segments stored byte-i
                               │                          (skipped for speech)
                               ▼
                           timeline ──► playout (HLS + now-playing API)
-                                   └──► AzuraCast (live source + metadata)
+                                   └──► AzuraCast (metadata push)
 ```
 
 The six-hour delay is the whole trick: there is time to probe the audio, bisect
@@ -164,7 +164,6 @@ Only what cannot change while running is an environment variable:
 | `BUFFER_HOURS` | `24` | Must exceed the delay. ~29 MB per hour |
 | `SEED_ON_START` | `true` | Build the fingerprint index from the catalog on first run |
 | `RECOGNIZER` | `shazamio` | or `audd`, `acrcloud` |
-| `AZURACAST_DJ_CODEC` | `mp3` | or `copy` to pass the original AAC through |
 
 Everything else lives in the dashboard's **Settings** panel and is stored in the
 database: the whole AzuraCast integration, the public URL, display language, and
@@ -183,9 +182,12 @@ something small and the stream becomes near-live.
 ### AzuraCast
 
 Fill in the base URL, station ID and API key (the key needs the station's
-*Broadcasting* permission) in the dashboard's Settings panel, plus the DJ URL and
-password to push audio as a live source, then tick **Enable AzuraCast**. Both the
-metadata push and the audio source follow the toggle within a few seconds.
+*Broadcasting* permission) in the dashboard's Settings panel, then tick **Enable
+AzuraCast**. The push follows the toggle within a few seconds.
+
+Audio reaches AzuraCast on its own: point the station at this container's stream
+as a remote source. We used to also push it as a DJ/streamer connection, which
+made AzuraCast treat the station as live.
 
 Turning it off hands the station back its own identity -- title "RockFM", no
 artist, the RockFM logo -- rather than leaving AzuraCast frozen on whatever song
@@ -196,10 +198,19 @@ The station must use the **Liquidsoap backend**. Metadata updates go through
 `custom_metadata.insert` — a relay-only station has no backend adapter and the
 call fails.
 
-Artwork is sent along with the metadata, but whether AzuraCast keeps our URL or
-substitutes its own Last.fm/MusicBrainz lookup depends on the version.
-`MetadataClient.probe_art_support()` reports which. Either way the container's
-own now-playing API carries the official RockFM artwork.
+**Artwork cannot be sent this way, on any version.** The endpoint hands every
+parameter to Liquidsoap's `custom_metadata.insert`, and AzuraCast filters them
+against `AnnotateNextSong::ALLOWED_ANNOTATIONS` first -- a list holding `title`,
+`artist`, `duration`, various ids and cue points, and no `art` or `album`. Both
+are dropped before the annotation is built, which is why a station shows the
+right song under the wrong picture.
+
+What does work is letting AzuraCast find the art itself: with *Attempt to fetch
+album art from external sources in API requests* enabled (Administration ->
+System Settings), it resolves covers from the artist and title we send. Stretches
+between songs have nothing to look up and fall back to the station's default
+album art. The container's own now-playing API carries the official RockFM
+artwork throughout regardless.
 
 ## Development
 

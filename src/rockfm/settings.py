@@ -49,8 +49,6 @@ FIELDS: Final[dict[str, tuple[Any, str, str]]] = {
     "azuracast_base_url": ("", "AZURACAST_BASE_URL", "text"),
     "azuracast_station_id": ("", "AZURACAST_STATION_ID", "text"),
     "azuracast_api_key": ("", "AZURACAST_API_KEY", "secret"),
-    "azuracast_dj_url": ("", "AZURACAST_DJ_URL", "text"),
-    "azuracast_dj_password": ("", "AZURACAST_DJ_PASSWORD", "secret"),
 }
 
 SECRETS: Final = frozenset(name for name, (_d, _e, kind) in FIELDS.items() if kind == "secret")

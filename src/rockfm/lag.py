@@ -100,12 +100,21 @@ def align(reference: np.ndarray, probe: np.ndarray, rate: int = RATE) -> Alignme
 
     best = int(np.argmax(score))
     peak = float(score[best])
-    if peak < MIN_SCORE:
-        return None
-
     guard = max(1, int(rate * GUARD_SECONDS))
     rivals = np.concatenate([score[: max(0, best - guard)], score[best + guard + 1 :]])
-    if rivals.size and peak < float(rivals.max()) * MIN_LEAD:
+    runner_up = float(rivals.max()) if rivals.size else 0.0
+
+    # Rejections are logged rather than swallowed: a probe that never locks on
+    # is indistinguishable from one that never runs, and the numbers say which
+    # of the two thresholds turned it away.
+    if peak < MIN_SCORE:
+        log.info("broadcast did not match the buffer (best %.2f, needs %.2f)", peak, MIN_SCORE)
+        return None
+    if runner_up and peak < runner_up * MIN_LEAD:
+        log.info(
+            "broadcast matched in more than one place (%.2f here, %.2f elsewhere)",
+            peak, runner_up,
+        )
         return None
     return Alignment(index=best, score=peak)
 
@@ -163,7 +172,9 @@ class LagProbe:
         """One measurement, or None if the broadcast could not be placed."""
         url = self._listen_url()
         if not url:
+            log.warning("no mount to listen to yet, so the broadcast cannot be timed")
             return None
+        log.debug("timing the broadcast against %s", url)
         try:
             probe = self._capture(
                 url, rate=RATE, duration=PROBE_SECONDS, timeout=PROBE_SECONDS * 4
@@ -174,7 +185,10 @@ class LagProbe:
         # The moment capture ended is the moment the last sample was on air.
         airing_now = self._position()
         if probe.size < int(RATE * PROBE_SECONDS * 0.5):
-            log.debug("broadcast sample too short to place (%d frames)", probe.size)
+            log.warning(
+                "only %.1fs of broadcast captured, too little to place",
+                probe.size / RATE,
+            )
             return None
 
         probe_ms = int(probe.size * 1000 / RATE)
@@ -182,17 +196,19 @@ class LagProbe:
         span_ms = int((MAX_LAG_SECONDS + MARGIN_SECONDS) * 1000) + probe_ms
         reference = self.reader.read(begins_ms, span_ms, rate=RATE)
         if reference.size < probe.size:
+            log.warning("the buffer holds less audio than the sample; cannot place it")
             return None
 
         found = align(reference, probe, rate=RATE)
         if found is None:
-            log.debug("broadcast sample did not match the buffer")
-            return None
+            return None                      # align() has already said why
 
         ends_ms = begins_ms + int((found.index + probe.size) * 1000 / RATE)
         lag = airing_now - ends_ms
         if lag < -MARGIN_SECONDS * 1000 or lag > MAX_LAG_SECONDS * 1000:
-            log.debug("placed the broadcast %.1fs away, which is not believable", lag / 1000)
+            log.warning(
+                "placed the broadcast %.1fs away, which is not believable", lag / 1000
+            )
             return None
         return max(0, lag)
 
@@ -202,6 +218,7 @@ class LagProbe:
             self._measured_at = time.monotonic()
 
     def run(self) -> None:
+        log.info("lag probe started; timing the broadcast every %.0fs", INTERVAL_SECONDS)
         while not self.stop_event.is_set():
             measured = self.measure_once()
             if measured is None:

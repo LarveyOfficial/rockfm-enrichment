@@ -278,3 +278,91 @@ def test_a_small_delay_does_not_overshoot_the_song(tmp_path):
     bridge = _bridge(tmp_path)
     bridge.lag.record(20_000)
     assert bridge.current()["title"] == "Basket Case"
+
+
+# --- how long the carrier claims to be ---------------------------------------
+#
+# AzuraCast reads the running time off the media record, not off the `duration`
+# we push, so every song showed as 0:01 -- the carrier's own second of silence.
+
+
+class _Library(_Api):
+    """AzuraCast, but with opinions about being told a track length.
+
+    `keeps` False is the quiet refusal: the PUT succeeds and the record is
+    unchanged, which is indistinguishable from success without reading it back.
+    """
+
+    def __init__(self, keeps=True, refuses=False):
+        super().__init__()
+        self.keeps, self.refuses, self.length = keeps, refuses, 1.0
+
+    def put(self, url, **kw):
+        if self.refuses and "length" in kw.get("json", {}):
+            raise __import__("httpx").HTTPError("422 Unprocessable Entity")
+        if self.keeps and "length" in kw.get("json", {}):
+            self.length = kw["json"]["length"]
+        return super().put(url, **kw)
+
+    def get(self, url, **kw):
+        if "/file/" in url:
+            self.calls.append(("get", url, kw))
+            return _Reply({"length": self.length})
+        return super().get(url, **kw)
+
+
+def _lengths_put(api):
+    return [kw["json"]["length"] for _m, url, kw in api.calls
+            if _m == "put" and "/file/" in url and "length" in kw.get("json", {})]
+
+
+TIMED_SONG = dict(SONG, start_ms=1_000_000, end_ms=1_204_108)
+
+
+def test_the_carrier_is_told_how_long_the_song_runs(tmp_path):
+    carrier, api, _ = _carrier(tmp_path, _Library())
+    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
+    assert _lengths_put(api) == [pytest.approx(204.108)]
+
+
+def test_a_song_of_unknown_length_says_nothing_about_it(tmp_path):
+    carrier, api, _ = _carrier(tmp_path, _Library())
+    carrier.publish("77", metadata_for(SONG, "es"))
+    assert _lengths_put(api) == []
+
+
+def test_a_refused_length_does_not_cost_us_the_artwork(tmp_path):
+    """Losing the picture to gain a running time would be a bad trade."""
+    carrier, api, _ = _carrier(tmp_path, _Library(refuses=True))
+    assert carrier.publish("77", metadata_for(TIMED_SONG, "es")) is True
+    described = [kw["json"] for _m, url, kw in api.calls if _m == "put" and "/file/" in url]
+    assert described and "length" not in described[-1]
+    assert described[-1]["title"] == "Denis"
+
+
+def test_a_refusal_is_remembered_rather_than_retried_every_song(tmp_path):
+    carrier, api, _ = _carrier(tmp_path, _Library(refuses=True))
+    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
+    before = len(api.calls)
+    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
+    assert _lengths_put(api) == [], "kept offering a length after it was refused"
+    assert len(api.calls) > before
+
+
+def test_a_length_that_quietly_does_not_stick_is_noticed(tmp_path):
+    """A 200 that changes nothing looks exactly like success until you look."""
+    carrier, api, _ = _carrier(tmp_path, _Library(keeps=False))
+    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
+    assert carrier._length_kept is False
+    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
+    assert len(_lengths_put(api)) == 1, "kept sending a length that never stuck"
+
+
+def test_a_length_that_sticks_is_trusted_from_then_on(tmp_path):
+    carrier, api, _ = _carrier(tmp_path, _Library(keeps=True))
+    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
+    assert carrier._length_kept is True
+    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
+    assert len(_lengths_put(api)) == 2
+    reads = [1 for _m, url, _kw in api.calls if _m == "get" and "/file/" in url]
+    assert len(reads) == 1, "read the record back more than once"

@@ -262,6 +262,8 @@ class MediaCarrier:
         self._db = database
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
         self._art_sent: str | None = None
+        # None until we have seen whether AzuraCast keeps a length we give it.
+        self._length_kept: bool | None = None
 
     @property
     def settings(self) -> dict:
@@ -347,6 +349,26 @@ class MediaCarrier:
         body = {"title": metadata.title, "artist": metadata.artist}
         if metadata.album:
             body["album"] = metadata.album
+        # And it takes the running time from the record too, not from the
+        # `duration` we push -- which is why every song read 0:01, the carrier
+        # being one second of silence.
+        if metadata.duration and self._length_kept is not False:
+            body["length"] = round(metadata.duration, 3)
+
+        if not self._describe(current, station, media_id, body):
+            if "length" not in body:
+                return False
+            # Refused outright: keep the artwork rather than lose both to it.
+            self._length_kept = False
+            log.info("AzuraCast refused a track length; songs will read as the carrier's")
+            body.pop("length")
+            return self._describe(current, station, media_id, body)
+
+        if "length" in body and self._length_kept is None:
+            self._length_kept = self._length_took(current, station, media_id, body["length"])
+        return True
+
+    def _describe(self, current: dict, station: str, media_id: str, body: dict) -> bool:
         try:
             response = self.client.put(
                 self._url(current, f"/api/station/{station}/file/{media_id}"),
@@ -358,6 +380,32 @@ class MediaCarrier:
             log.warning("could not describe the artwork carrier: %s", exc)
             return False
         return True
+
+    def _length_took(self, current: dict, station: str, media_id: str, asked: float) -> bool:
+        """Did the length stick? Asked once, because a quiet refusal looks the same.
+
+        AzuraCast may accept the field and then keep computing the length from
+        the file, which returns 200 and changes nothing. Reading the record back
+        once settles it, and the answer is remembered.
+        """
+        try:
+            response = self.client.get(
+                self._url(current, f"/api/station/{station}/file/{media_id}"),
+                headers=self._headers(current),
+            )
+            response.raise_for_status()
+            kept = float(response.json().get("length") or 0)
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            log.debug("could not read the carrier back: %s", exc)
+            return True                      # assume it took; try again next time
+        if abs(kept - asked) < 1.0:
+            log.info("AzuraCast keeps the track length we set (%.0fs)", kept)
+            return True
+        log.warning(
+            "AzuraCast kept %.0fs rather than the %.0fs we set; songs will show its length",
+            kept, asked,
+        )
+        return False
 
 
 def _silent_mp3() -> bytes | None:

@@ -10,8 +10,12 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data \
     HTTP_PORT=8080
 
+# ca-certificates is for ffmpeg, not for Python: httpx carries its own bundle,
+# so the API calls worked without it while every https:// URL handed to ffmpeg
+# failed its TLS handshake and came back as "Invalid data found".
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg curl supervisor tzdata \
+ && apt-get install -y --no-install-recommends \
+      ffmpeg curl supervisor tzdata ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

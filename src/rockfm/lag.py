@@ -169,7 +169,7 @@ class LagProbe:
                 url, rate=RATE, duration=PROBE_SECONDS, timeout=PROBE_SECONDS * 4
             )
         except Exception as exc:                     # noqa: BLE001 - ffmpeg, network, anything
-            log.warning("could not listen to the broadcast: %s", exc)
+            log.warning("could not listen to the broadcast at %s: %s", url, exc)
             return None
         # The moment capture ended is the moment the last sample was on air.
         airing_now = self._position()

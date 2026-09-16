@@ -10,17 +10,17 @@ That endpoint routes to Liquidsoap's `custom_metadata.insert`, so the station
 must have a Liquidsoap backend -- a relay-only station has no backend adapter
 and the call fails. The API key needs the station's "Broadcasting" permission.
 
-On artwork: it cannot be sent this way, on any version. AzuraCast filters the
+On artwork: the `art` parameter itself never arrives. AzuraCast filters the
 request's parameters against `AnnotateNextSong::ALLOWED_ANNOTATIONS` before
 building the annotation, and that list holds `title`, `artist`, `duration`,
 various ids and cue points -- no `art`, no `album`. Both are dropped without a
-word, which is why a station fed by this shows the right song, an empty album
-and the wrong picture.
+word, which is why the album field stays empty however we send it.
 
-We send them anyway: they cost nothing, and a later version that widens the
-list would start working on its own. Meanwhile AzuraCast resolves covers from
-the artist and title we do send, and our own now-playing API carries the
-official RockFM artwork regardless.
+`media_id` is on that list, though, so artwork reaches AzuraCast a different
+way: MediaCarrier keeps one never-played media record in the station library,
+writes the current cover onto it, and we name it in the push. AzuraCast then
+resolves the cover from that record -- its own library -- rather than from a
+default or an external lookup. See docs/azuracast-artwork.md.
 """
 
 from __future__ import annotations

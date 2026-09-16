@@ -94,7 +94,7 @@ never played, purely a metadata carrier. On each boundary:
 Three calls per song change, roughly one change every three minutes. The artwork
 is then exactly the image we send: no external lookup, no default.
 
-### Open question to settle first
+### Settled: the annotation path does carry `media_id`
 
 `FeedbackCommand::doRun` begins:
 
@@ -104,14 +104,22 @@ if (!$asAutoDj) {
 }
 ```
 
-It needs confirming that our `custom_metadata.insert` path reaches this carrying
-`media_id`, rather than only the AutoDJ callback doing so. If it does not, the
-fallback is the same three calls driving the queue directly instead of the
-annotation — more work, same result.
+so it was an open question whether our `custom_metadata.insert` path reaches it
+carrying `media_id`, or whether only the AutoDJ callback does. It does. Read
+back from a live station while the three calls were running:
 
-Cheapest test: upload one media record, set a distinctive image on it, push
-`media_id` with the metadata, and read `/api/nowplaying/{id}` to see whether
-`now_playing.song.art` becomes the media art URL.
+```
+art: https://radio.luisvervaet.dev/api/station/rock_fm/art/2eba06a6c6dff045b57e5537-….jpg
+```
+
+That is the `api:stations:media:art` route -- branch 1, the station media
+library -- not the station default under `/static/uploads/…/album_art.*` and not
+a remote lookup. The carrier record is what AzuraCast serves. No fallback to
+driving the queue directly is needed.
+
+Note the album field stays empty, exactly as the filter predicts: `album` is not
+in `ALLOWED_ANNOTATIONS` either, and the carrier's album is not what
+`SongApiGenerator` reads for that field.
 
 ### Variants
 
@@ -124,6 +132,18 @@ Cheapest test: upload one media record, set a distinctive image on it, push
 
 ## Related
 
-`MetadataClient.probe_art_support()` exists to detect whether AzuraCast kept our
-artwork. It has never been called from anywhere. Now that the answer is known to
-be a flat no for the `art` parameter, it should be deleted rather than wired up.
+Getting here also required the station's remote-URL playlist to be typed
+**Stream**, not **Playlist**. Typed as a playlist, AzuraCast downloads the
+`.m3u8`, reads it as an M3U track list, takes its one non-comment line and hands
+that to Liquidsoap without resolving it against the base URL:
+
+```
+Response (200): {"uri":"annotate:playlist_id="17":chunks.m3u8"}
+[request:3] Nonexistent file or ill-formed URI "chunks.m3u8"!
+```
+
+Liquidsoap then retries once a second forever and falls back to `error.mp3`,
+which surfaces as "Station Offline" with the queue stuck on "Remote Playlist
+URL". Any HLS master playlist fails this way, RockFM's own included -- the
+relative child reference is correct HLS, and AzuraCast is simply reading it as
+something it is not.

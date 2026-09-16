@@ -26,6 +26,7 @@ default or an external lookup. See docs/azuracast-artwork.md.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import shutil
 import signal
@@ -49,8 +50,13 @@ log = logging.getLogger("rockfm.azuracast")
 POLL_SECONDS = 2.0
 # Where the artwork carrier lives in the station's library, and where its id is
 # remembered so it is only ever created once.
-CARRIER_PATH = "rockfm/nowplaying-artwork.mp3"
-MEDIA_ID_KEY = "azuracast_media_id"
+CARRIER_DIR = "rockfm/carriers"
+# Keyed by what the record says, so a record is written once and never edited.
+CARRIER_KEY_PREFIX = "azuracast_carrier:"
+# Silence is rendered at the song's real length so AzuraCast can read the
+# duration off the audio. Long programmes are capped -- hours of silence is not
+# worth the upload, and their length still goes on the record.
+MAX_RENDER_SECONDS = 600.0
 RESTART_DELAY = 5.0
 
 
@@ -244,28 +250,45 @@ class MetadataClient:
         self.client.close()
 
 
+def carrier_key(metadata: Metadata) -> str:
+    """Identifies a record by everything the record will say.
+
+    Two airings that agree on name, album and length can share a record; any
+    difference makes a new one. Keying on the content is what lets a record be
+    written once and then left alone.
+    """
+    seconds = round(metadata.duration) if metadata.duration else 0
+    raw = "\x00".join(
+        (metadata.artist or "", metadata.title or "", metadata.album or "", str(seconds))
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
+
 class MediaCarrier:
-    """A media record in AzuraCast's library that carries our artwork.
+    """One media record per distinct song, carrying its artwork and length.
 
     AzuraCast will not accept artwork for now-playing: `art` is dropped from the
     Liquidsoap annotation before it is built. What it will accept is `media_id`,
-    and a now-playing row that has one is a StationMedia -- whose art comes from
-    the library, which we can write to.
+    and a now-playing row that has one is a StationMedia -- whose art and
+    running time come from the library, which we can write to.
 
-    So one record is kept, never played, purely as somewhere to put the picture.
-    Each time the song changes its art, title and artist are rewritten and the
-    metadata push points at it.
+    There was one shared record for a while, rewritten at every boundary. That
+    worked for artwork and failed at everything else: AzuraCast decides a song
+    has changed partly by the record it points at, so a constant id left it
+    announcing the same track forever, never resetting the elapsed time, while
+    the length was edited underneath it at the very moment it was being read.
+
+    So each distinct song gets its own record, written once on its first airing
+    and reused untouched on every later one. A boundary becomes a single call
+    that names an already-correct record.
     """
 
     def __init__(self, config: Config, database: db.ThreadLocalDB, timeout: float = 30.0) -> None:
         self.config = config
         self._db = database
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
-        self._art_sent: str | None = None
-        # Set only when AzuraCast rejects the field outright. A length that is
-        # accepted and quietly dropped is reported, never latched: the check is
-        # one racy read, and letting it switch the field off for good cost every
-        # song after the first its running time.
+        # Set only when AzuraCast rejects a length outright, which a schema will
+        # keep doing. A length that is quietly ignored is reported, not latched.
         self._length_refused = False
         self._length_checked = False
 
@@ -282,35 +305,54 @@ class MediaCarrier:
     def _url(self, current: dict, path: str) -> str:
         return f"{current['azuracast_base_url'].rstrip('/')}{path}"
 
-    def media_id(self) -> str | None:
-        """The carrier record, creating it the first time it is needed."""
-        stored = db.get_meta(self._db.conn, MEDIA_ID_KEY)
-        if stored:
-            return stored
+    def record_for(self, metadata: Metadata) -> str | None:
+        """The record for this song, created and filled in the first time.
 
+        Returns None if it could not be made, which leaves the push to go out
+        without one: the right song under the wrong picture beats no song.
+        """
+        key = carrier_key(metadata)
+        remembered = db.get_meta(self._db.conn, CARRIER_KEY_PREFIX + key)
+        if remembered:
+            return remembered
+
+        media_id = self._create(metadata, key)
+        if media_id is None:
+            return None
+        # Only ever done here. Once a record exists it is never edited again.
+        self._describe_new(media_id, metadata)
+        self._send_artwork(media_id, metadata)
+        db.set_meta(self._db.conn, CARRIER_KEY_PREFIX + key, media_id)
+        log.info(
+            "carrier %s created for %s - %s (%.0fs)",
+            media_id, metadata.artist, metadata.title, metadata.duration or 0,
+        )
+        return media_id
+
+    def _create(self, metadata: Metadata, key: str) -> str | None:
         current = self.settings
-        silence = _silent_mp3()
+        silence = _silent_mp3(min(metadata.duration or 1.0, MAX_RENDER_SECONDS))
         if silence is None:
             return None
         station = current["azuracast_station_id"]
         try:
             response = self.client.post(
                 self._url(current, f"/api/station/{station}/files"),
-                json={"path": CARRIER_PATH, "file": base64.b64encode(silence).decode()},
+                json={
+                    "path": f"{CARRIER_DIR}/{key}.mp3",
+                    "file": base64.b64encode(silence).decode(),
+                },
                 headers=self._headers(current),
             )
             response.raise_for_status()
-            created = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            log.warning("could not create the artwork carrier: %s", exc)
+            created = response.json() or {}
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.warning("could not create a carrier record: %s", exc)
             return None
-
         found = str(created.get("id") or "")
         if not found:
-            log.warning("artwork carrier was created without an id: %s", created)
+            log.warning("carrier record was created without an id: %s", created)
             return None
-        db.set_meta(self._db.conn, MEDIA_ID_KEY, found)
-        log.info("created the artwork carrier as media %s", found)
         return found
 
     def artwork(self, metadata: Metadata) -> bytes | None:
@@ -329,43 +371,39 @@ class MediaCarrier:
             log.warning("could not read artwork %s: %s", metadata.art, exc)
             return None
 
-    def publish(self, media_id: str, metadata: Metadata) -> bool:
-        """Put this song's picture and name on the carrier record."""
+    def _send_artwork(self, media_id: str, metadata: Metadata) -> None:
+        image = self.artwork(metadata)
+        if image is None:
+            return
         current = self.settings
         station = current["azuracast_station_id"]
+        try:
+            response = self.client.post(
+                self._url(current, f"/api/station/{station}/art/{media_id}"),
+                files={"file": ("art.jpg", image, "image/jpeg")},
+                headers=self._headers(current),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("artwork upload failed: %s", exc)
 
-        if metadata.art and metadata.art != self._art_sent:
-            image = self.artwork(metadata)
-            if image is not None:
-                try:
-                    response = self.client.post(
-                        self._url(current, f"/api/station/{station}/art/{media_id}"),
-                        files={"file": ("art.jpg", image, "image/jpeg")},
-                        headers=self._headers(current),
-                    )
-                    response.raise_for_status()
-                    self._art_sent = metadata.art
-                except httpx.HTTPError as exc:
-                    log.warning("artwork upload failed: %s", exc)
-
-        # With a media_id present AzuraCast takes the song from the record, so
-        # the record has to say what is playing.
-        body = {"title": metadata.title, "artist": metadata.artist}
+    def _describe_new(self, media_id: str, metadata: Metadata) -> bool:
+        """Name the freshly created record, and say how long it runs."""
+        current = self.settings
+        station = current["azuracast_station_id"]
+        body: dict = {"title": metadata.title, "artist": metadata.artist}
         if metadata.album:
             body["album"] = metadata.album
-        # And it takes the running time from the record too, not from the
-        # `duration` we push -- which is why every song read 0:01, the carrier
-        # being one second of silence.
+        # The rendered silence already runs this long, up to the cap. Saying so
+        # as well covers the capped case and anything that re-reads the record.
         if metadata.duration and not self._length_refused:
             body["length"] = round(metadata.duration, 3)
 
         if not self._describe(current, station, media_id, body):
             if "length" not in body:
                 return False
-            # Refused outright, which a schema will keep doing. Drop it and keep
-            # the artwork: losing both to the running time would be a bad trade.
             self._length_refused = True
-            log.info("AzuraCast refused a track length; songs will read as the carrier's")
+            log.info("AzuraCast refused a track length; carriers will read as their audio")
             body.pop("length")
             return self._describe(current, station, media_id, body)
 
@@ -383,26 +421,21 @@ class MediaCarrier:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            log.warning("could not describe the artwork carrier: %s", exc)
+            log.warning("could not describe carrier %s: %s", media_id, exc)
             return False
         return True
 
     def _report_length(self, current: dict, station: str, media_id: str, asked: float) -> None:
-        """Say once whether the length stuck. Diagnostic only -- never a switch.
-
-        AzuraCast may accept the field and go on computing the length from the
-        file, which returns 200 and changes nothing. Worth knowing, but one
-        read is racy, so it is logged rather than acted on: the field costs
-        nothing to keep sending, and sending it is the only way it can work.
-        """
+        """Say once whether a length we set stuck. Diagnostic only, never a switch."""
         try:
             response = self.client.get(
                 self._url(current, f"/api/station/{station}/file/{media_id}"),
                 headers=self._headers(current),
             )
             response.raise_for_status()
-            kept = float(response.json().get("length") or 0)
-        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            # A body that is not a JSON object is not worth crashing over.
+            kept = float((response.json() or {}).get("length") or 0)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
             log.debug("could not read the carrier back: %s", exc)
             return
         if abs(kept - asked) < 1.0:
@@ -414,17 +447,24 @@ class MediaCarrier:
             )
 
 
-def _silent_mp3() -> bytes | None:
-    """A second of silence, to hang artwork from. Never played."""
+def _silent_mp3(seconds: float = 1.0) -> bytes | None:
+    """Silence of a given length, to hang a song's artwork and duration from.
+
+    Never played. Rendered at the song's own length so AzuraCast can read the
+    duration off the audio rather than only from the field we set -- a field it
+    may recompute from the file later. Low bitrate mono keeps a four-minute
+    track under half a megabyte.
+    """
     if not shutil.which("ffmpeg"):
-        log.warning("ffmpeg is needed once to create the artwork carrier")
+        log.warning("ffmpeg is needed to create a carrier record")
         return None
+    length = max(1.0, min(float(seconds), MAX_RENDER_SECONDS))
     try:
         done = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
-             "-i", "anullsrc=r=44100:cl=stereo", "-t", "1",
-             "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "-"],
-            capture_output=True, timeout=30, check=True,
+             "-i", "anullsrc=r=16000:cl=mono", "-t", f"{length:.3f}",
+             "-c:a", "libmp3lame", "-b:a", "16k", "-f", "mp3", "-"],
+            capture_output=True, timeout=60, check=True,
         )
         return done.stdout or None
     except (subprocess.SubprocessError, OSError) as exc:
@@ -513,13 +553,13 @@ class MetadataBridge:
             current["public_url"],
             appearance.load(self._db.conn, current["display_language"]),
         )
-        # Artwork can only travel on a media record, so give the carrier this
-        # song's picture and name before pointing now-playing at it. If any of
-        # that fails the push still goes out; a song under the wrong picture
-        # beats no song at all.
-        media_id = self.carrier.media_id() if metadata.art else None
-        if media_id and not self.carrier.publish(media_id, metadata):
-            media_id = None
+        # Artwork and running time can only travel on a media record, so name
+        # the record for this song and let AzuraCast read both off it. Created
+        # on a song's first airing and reused untouched afterwards, so a
+        # boundary is one call against something already correct. If it cannot
+        # be made the push still goes out: the right song under the wrong
+        # picture beats no song at all.
+        media_id = self.carrier.record_for(metadata)
 
         if self.client.push(metadata, media_id=media_id):
             self._last = key

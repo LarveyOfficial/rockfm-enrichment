@@ -121,14 +121,35 @@ Note the album field stays empty, exactly as the filter predicts: `album` is not
 in `ALLOWED_ANNOTATIONS` either, and the carrier's album is not what
 `SongApiGenerator` reads for that field.
 
-### Variants
+### One record per song, not one shared record
 
-- **One shared record, rewritten each time** (above). Fewest records; needs the
-  title/artist update on every change. Watch `isDifferentFromCurrentSong` — the
-  song hash must change or AzuraCast may treat it as the same track.
-- **One record per distinct song.** More uploads up front, but each record is
-  written once and reused on later airings, and no per-boundary title update.
-  Better fit for a station with a repeating rotation.
+Both were on the table. The shared record -- one placeholder rewritten at every
+boundary -- was built first because it is less work, and it was wrong:
+
+- AzuraCast decides a song has changed partly by the record being pointed at.
+  A constant `media_id` left it announcing the same track indefinitely, with
+  the elapsed time never resetting.
+- The record was being edited at the moment AzuraCast was reading it. The
+  length in particular is written and then immediately asked for, which is a
+  race whichever way it is arranged.
+
+So each distinct song gets its own record instead, keyed by everything the
+record states -- artist, title, album and length rounded to the second:
+
+```python
+raw = "\x00".join((artist, title, album, str(round(seconds))))
+key = hashlib.sha256(raw.encode()).hexdigest()[:20]
+```
+
+A station's rotation converges quickly, and a record is written exactly once:
+create, name, set the length, upload the art. Every later airing is a single
+call naming something already correct, and nothing is ever edited in place.
+Keying on the length means an edited airing gets its own record rather than
+rewriting the one the full version uses.
+
+The silence is rendered at the song's real length (capped at ten minutes, for
+programmes) so AzuraCast can read the duration off the audio and not only from
+the field, which it may recompute from the file later.
 
 ## Related
 

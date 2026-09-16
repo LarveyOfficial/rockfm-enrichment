@@ -1,3 +1,6 @@
+import shutil
+
+import httpx
 import pytest
 
 from rockfm.azuracast import metadata_for
@@ -105,11 +108,13 @@ class _Api:
 
     def __init__(self, media_id="77"):
         self.media_id, self.calls = media_id, []
+        self._made = 0
 
     def post(self, url, **kw):
         self.calls.append(("post", url, kw))
         if "/files" in url:
-            return _Reply({"id": self.media_id})
+            self._made += 1
+            return _Reply({"id": str(int(self.media_id) + self._made - 1)})
         return _Reply({})
 
     def put(self, url, **kw):
@@ -143,16 +148,87 @@ def _carrier(tmp_path, api=None):
     return carrier, carrier.client, config
 
 
-def test_the_carrier_record_is_created_once_and_remembered(tmp_path):
-    """Uploading a placeholder on every song change would be absurd."""
+SONG_META = dict(SONG, start_ms=1_000_000, end_ms=1_204_108)
+
+
+def _meta(**over):
+    return metadata_for(dict(SONG_META, **over), "es")
+
+
+def uploads(api):
+    return [kw["json"]["path"] for m, url, kw in api.calls if m == "post" and "/files" in url]
+
+
+def edits(api):
+    return [kw["json"] for m, url, kw in api.calls if m == "put" and "/file/" in url]
+
+
+def test_a_song_gets_a_record_of_its_own(tmp_path):
     carrier, api, _ = _carrier(tmp_path)
+    assert carrier.record_for(_meta()) == "77"
+    assert len(uploads(api)) == 1
+    assert uploads(api)[0].startswith("rockfm/carriers/")
+    assert edits(api)[0]["title"] == "Denis"
+    assert edits(api)[0]["length"] == pytest.approx(204.108)
 
-    first = carrier.media_id()
-    uploads = [c for c in api.calls if "/files" in c[1]]
-    assert first == "77" and len(uploads) == 1
 
-    assert carrier.media_id() == "77"
-    assert len([c for c in api.calls if "/files" in c[1]]) == 1, "uploaded twice"
+def test_the_same_song_reuses_its_record_untouched(tmp_path):
+    """The bug that prompted this: a record edited under AzuraCast's feet.
+
+    A rewritten record left the elapsed time never resetting, because a
+    constant id is part of how AzuraCast decides the song has changed.
+    """
+    carrier, api, _ = _carrier(tmp_path)
+    first = carrier.record_for(_meta())
+    settled = len(api.calls)
+
+    assert carrier.record_for(_meta()) == first
+    assert len(api.calls) == settled, "touched AzuraCast again for a record it already had"
+
+
+def test_two_songs_get_two_records(tmp_path):
+    """Distinct ids are what tell AzuraCast the song actually changed."""
+    carrier, api, _ = _carrier(tmp_path)
+    one = carrier.record_for(_meta())
+    two = carrier.record_for(_meta(title="Basket Case", artist="Green Day"))
+    assert one != two
+    assert len(uploads(api)) == 2
+
+
+def test_the_same_song_cut_to_a_different_length_gets_its_own_record(tmp_path):
+    """Stations edit tracks; a record states one length and is never rewritten."""
+    carrier, _api, _ = _carrier(tmp_path)
+    full = carrier.record_for(_meta())
+    short = carrier.record_for(_meta(end_ms=1_150_000))
+    assert full != short
+
+
+def test_a_record_is_kept_across_restarts(tmp_path):
+    """Remembered in the database, so a restart does not re-upload the library."""
+    carrier, api, config = _carrier(tmp_path)
+    carrier.record_for(_meta())
+
+    from rockfm import db
+    from rockfm.azuracast import MediaCarrier
+    again = MediaCarrier(config, db.ThreadLocalDB(config.db_path))
+    again.client = api
+    assert again.record_for(_meta()) == "77"
+    assert len(uploads(api)) == 1
+
+
+def test_the_key_ignores_nothing_that_the_record_states():
+    from rockfm.azuracast import Metadata, carrier_key
+
+    base = Metadata(title="t", artist="a", album="b", duration=200.0)
+    assert carrier_key(base) == carrier_key(Metadata(title="t", artist="a",
+                                                     album="b", duration=200.4))
+    for different in (
+        Metadata(title="other", artist="a", album="b", duration=200.0),
+        Metadata(title="t", artist="other", album="b", duration=200.0),
+        Metadata(title="t", artist="a", album="other", duration=200.0),
+        Metadata(title="t", artist="a", album="b", duration=170.0),
+    ):
+        assert carrier_key(base) != carrier_key(different)
 
 
 def test_our_own_artwork_is_read_from_disk_not_fetched(tmp_path):
@@ -177,38 +253,24 @@ def test_artwork_we_do_not_hold_is_fetched(tmp_path):
     assert [c for c in api.calls if c[0] == "get"]
 
 
-def test_publishing_sets_the_picture_and_the_name(tmp_path):
-    from rockfm.azuracast import Metadata
-
+def test_a_new_record_gets_the_song_picture(tmp_path):
     carrier, api, config = _carrier(tmp_path)
     (config.art_dir / "abc.jpg").write_bytes(b"local-bytes")
-    meta = Metadata(title="Denis", artist="Blondie", album="Plastic Letters",
-                    art="http://host:6967/art/abc.jpg")
 
-    assert carrier.publish("77", meta) is True
-
-    art_posts = [c for c in api.calls if "/art/77" in c[1]]
-    assert len(art_posts) == 1
-    assert art_posts[0][2]["files"]["file"][1] == b"local-bytes"
-
-    edits = [c for c in api.calls if c[0] == "put" and "/file/77" in c[1]]
-    assert len(edits) == 1
-    assert edits[0][2]["json"] == {"title": "Denis", "artist": "Blondie",
-                                   "album": "Plastic Letters"}
+    media_id = carrier.record_for(_meta())
+    posted = [kw for m, url, kw in api.calls if m == "post" and f"/art/{media_id}" in url]
+    assert len(posted) == 1
+    assert posted[0]["files"]["file"][1] == b"local-bytes"
 
 
 def test_the_same_picture_is_not_uploaded_twice(tmp_path):
     """A song holds for minutes and we poll every two seconds."""
-    from rockfm.azuracast import Metadata
-
     carrier, api, config = _carrier(tmp_path)
     (config.art_dir / "abc.jpg").write_bytes(b"local-bytes")
-    meta = Metadata(title="Denis", artist="Blondie",
-                    art="http://host:6967/art/abc.jpg")
 
-    carrier.publish("77", meta)
-    carrier.publish("77", meta)
-    assert len([c for c in api.calls if "/art/77" in c[1]]) == 1
+    carrier.record_for(_meta())
+    carrier.record_for(_meta())
+    assert len([1 for m, url, _ in api.calls if m == "post" and "/art/" in url]) == 1
 
 
 def test_the_push_names_the_media_record(tmp_path):
@@ -280,18 +342,15 @@ def test_a_small_delay_does_not_overshoot_the_song(tmp_path):
     assert bridge.current()["title"] == "Basket Case"
 
 
-# --- how long the carrier claims to be ---------------------------------------
+# --- how long the carrier says it runs --------------------------------------
 #
 # AzuraCast reads the running time off the media record, not off the `duration`
-# we push, so every song showed as 0:01 -- the carrier's own second of silence.
+# we push, so every song showed as 0:01 -- the shared carrier being one second
+# of silence. Each record now states its own song's length, once.
 
 
 class _Library(_Api):
-    """AzuraCast, but with opinions about being told a track length.
-
-    `keeps` False is the quiet refusal: the PUT succeeds and the record is
-    unchanged, which is indistinguishable from success without reading it back.
-    """
+    """AzuraCast, but with opinions about being told a track length."""
 
     def __init__(self, keeps=True, refuses=False):
         super().__init__()
@@ -299,7 +358,7 @@ class _Library(_Api):
 
     def put(self, url, **kw):
         if self.refuses and "length" in kw.get("json", {}):
-            raise __import__("httpx").HTTPError("422 Unprocessable Entity")
+            raise httpx.HTTPError("422 Unprocessable Entity")
         if self.keeps and "length" in kw.get("json", {}):
             self.length = kw["json"]["length"]
         return super().put(url, **kw)
@@ -312,71 +371,65 @@ class _Library(_Api):
 
 
 def _lengths_put(api):
-    return [kw["json"]["length"] for _m, url, kw in api.calls
-            if _m == "put" and "/file/" in url and "length" in kw.get("json", {})]
+    return [b["length"] for b in edits(api) if "length" in b]
 
 
-TIMED_SONG = dict(SONG, start_ms=1_000_000, end_ms=1_204_108)
-
-
-def test_the_carrier_is_told_how_long_the_song_runs(tmp_path):
+def test_each_record_states_its_own_length(tmp_path):
     carrier, api, _ = _carrier(tmp_path, _Library())
-    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    assert _lengths_put(api) == [pytest.approx(204.108)]
+    carrier.record_for(_meta())
+    carrier.record_for(_meta(title="Basket Case", end_ms=1_100_000))
+    assert _lengths_put(api) == [pytest.approx(204.108), pytest.approx(100.0)]
 
 
 def test_a_song_of_unknown_length_says_nothing_about_it(tmp_path):
     carrier, api, _ = _carrier(tmp_path, _Library())
-    carrier.publish("77", metadata_for(SONG, "es"))
+    carrier.record_for(metadata_for(SONG, "es"))
     assert _lengths_put(api) == []
 
 
 def test_a_refused_length_does_not_cost_us_the_artwork(tmp_path):
     """Losing the picture to gain a running time would be a bad trade."""
     carrier, api, _ = _carrier(tmp_path, _Library(refuses=True))
-    assert carrier.publish("77", metadata_for(TIMED_SONG, "es")) is True
-    described = [kw["json"] for _m, url, kw in api.calls if _m == "put" and "/file/" in url]
-    assert described and "length" not in described[-1]
-    assert described[-1]["title"] == "Denis"
-
-
-def test_a_refusal_is_remembered_rather_than_retried_every_song(tmp_path):
-    carrier, api, _ = _carrier(tmp_path, _Library(refuses=True))
-    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    before = len(api.calls)
-    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
-    assert _lengths_put(api) == [], "kept offering a length after it was refused"
-    assert len(api.calls) > before
+    assert carrier.record_for(_meta()) == "77"
+    assert edits(api) and "length" not in edits(api)[-1]
+    assert edits(api)[-1]["title"] == "Denis"
 
 
 def test_a_length_that_does_not_stick_is_reported_but_still_sent(tmp_path):
-    """The bug this replaces: one racy read switched the field off for good.
-
-    A 200 that changes nothing looks exactly like success until you look, so
-    looking is worth it -- but a single read is not evidence enough to stop
-    sending a field that costs nothing and is the only way the length can ever
-    arrive. Every song after the first lost its running time to that latch.
-    """
+    """One racy read must not switch the field off for every later song."""
     carrier, api, _ = _carrier(tmp_path, _Library(keeps=False))
-    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
-    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="A third"), "es"))
+    for title in ("Denis", "Another", "A third"):
+        carrier.record_for(_meta(title=title))
     assert len(_lengths_put(api)) == 3, "stopped sending the length after reading it back"
 
 
 def test_the_length_is_only_read_back_once(tmp_path):
-    """Worth one call to learn; not worth one per song."""
-    carrier, api, _ = _carrier(tmp_path, _Library(keeps=True))
-    for title in ("Denis", "Another", "A third"):
-        carrier.publish("77", metadata_for(dict(TIMED_SONG, title=title), "es"))
-    reads = [1 for _m, url, _kw in api.calls if _m == "get" and "/file/" in url]
-    assert len(reads) == 1
-    assert len(_lengths_put(api)) == 3
-
-
-def test_every_song_gets_its_own_length(tmp_path):
-    """Each boundary rewrites the carrier, so each length must go with it."""
     carrier, api, _ = _carrier(tmp_path, _Library())
-    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    carrier.publish("77", metadata_for(dict(SONG, start_ms=0, end_ms=100_000), "es"))
-    assert _lengths_put(api) == [pytest.approx(204.108), pytest.approx(100.0)]
+    for title in ("Denis", "Another", "A third"):
+        carrier.record_for(_meta(title=title))
+    assert len([1 for m, url, _ in api.calls if m == "get" and "/file/" in url]) == 1
+
+
+# --- the silence itself ------------------------------------------------------
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg renders the carrier")
+def test_the_silence_runs_as_long_as_the_song():
+    """So AzuraCast can read the duration off the audio, not only off a field."""
+    from rockfm.audio import decode_bytes
+    from rockfm.azuracast import _silent_mp3
+
+    rendered = _silent_mp3(12.0)
+    assert rendered
+    heard = decode_bytes(rendered, rate=8000)
+    assert heard.size / 8000 == pytest.approx(12.0, abs=0.5)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg renders the carrier")
+def test_an_hours_long_programme_is_not_rendered_in_full():
+    """Hours of silence is not worth uploading; the length still goes on record."""
+    from rockfm.audio import decode_bytes
+    from rockfm.azuracast import MAX_RENDER_SECONDS, _silent_mp3
+
+    heard = decode_bytes(_silent_mp3(4 * 3600.0), rate=8000)
+    assert heard.size / 8000 == pytest.approx(MAX_RENDER_SECONDS, abs=1.0)

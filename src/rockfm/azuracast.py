@@ -33,6 +33,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -51,12 +52,16 @@ POLL_SECONDS = 2.0
 # Where the artwork carrier lives in the station's library, and where its id is
 # remembered so it is only ever created once.
 CARRIER_DIR = "rockfm/carriers"
-# Keyed by what the record says, so a record is written once and never edited.
-CARRIER_KEY_PREFIX = "azuracast_carrier:"
 # Silence is rendered at the song's real length so AzuraCast can read the
 # duration off the audio. Long programmes are capped -- hours of silence is not
 # worth the upload, and their length still goes on the record.
 MAX_RENDER_SECONDS = 600.0
+# The record airing now, and the one before it. Anything older has left the
+# now-playing and is removed again -- one record per airing would otherwise fill
+# the station's library at the rate songs are played. The previous one is kept
+# rather than deleted the moment it stops, so nothing still reading it is
+# pulled out from under.
+KEEP_CARRIERS = 2
 RESTART_DELAY = 5.0
 
 
@@ -67,6 +72,7 @@ class Metadata:
     album: str | None = None
     art: str | None = None
     duration: float | None = None
+    started_ms: int | None = None
 
     def as_params(self) -> dict[str, str]:
         params = {"title": self.title, "artist": self.artist}
@@ -119,12 +125,14 @@ def metadata_for(
             album=item.get("album"),
             art=art,
             duration=_span_seconds(item),
+            started_ms=item.get("start_ms"),
         )
     return Metadata(
         title=primary,
         artist=secondary or S.STATION_NAME,
         art=art,
         duration=_span_seconds(item),
+        started_ms=item.get("start_ms"),
     )
 
 
@@ -251,16 +259,27 @@ class MetadataClient:
 
 
 def carrier_key(metadata: Metadata) -> str:
-    """Identifies a record by everything the record will say.
+    """Identifies one airing, not one song.
 
-    Two airings that agree on name, album and length can share a record; any
-    difference makes a new one. Keying on the content is what lets a record be
-    written once and then left alone.
+    The same track played twice is two airings and gets two records. A station
+    cuts tracks differently each time, so the second airing may well run to a
+    different length -- but the reason to separate them holds even when it does
+    not: AzuraCast decides the song has changed partly by the record being
+    pointed at, and pointing at a record it has already seen reads as the same
+    track still playing, with the elapsed time never going back to zero.
+
+    The start time is what makes it per-airing, and keying on it rather than
+    counting means the answer is the same if we ask twice -- a restart
+    mid-song finds the record it already made instead of making another.
     """
     seconds = round(metadata.duration) if metadata.duration else 0
-    raw = "\x00".join(
-        (metadata.artist or "", metadata.title or "", metadata.album or "", str(seconds))
-    )
+    raw = "\x00".join((
+        metadata.artist or "",
+        metadata.title or "",
+        metadata.album or "",
+        str(seconds),
+        str(metadata.started_ms or 0),
+    ))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -312,7 +331,7 @@ class MediaCarrier:
         without one: the right song under the wrong picture beats no song.
         """
         key = carrier_key(metadata)
-        remembered = db.get_meta(self._db.conn, CARRIER_KEY_PREFIX + key)
+        remembered = db.carrier_media_id(self._db.conn, key)
         if remembered:
             return remembered
 
@@ -322,12 +341,43 @@ class MediaCarrier:
         # Only ever done here. Once a record exists it is never edited again.
         self._describe_new(media_id, metadata)
         self._send_artwork(media_id, metadata)
-        db.set_meta(self._db.conn, CARRIER_KEY_PREFIX + key, media_id)
+        db.remember_carrier(
+            self._db.conn, key, media_id,
+            metadata.started_ms or 0, int(time.time() * 1000),
+        )
         log.info(
             "carrier %s created for %s - %s (%.0fs)",
             media_id, metadata.artist, metadata.title, metadata.duration or 0,
         )
+        self._prune()
         return media_id
+
+    def _prune(self) -> None:
+        """Remove the records that are no longer the current one or the one before.
+
+        Only records this station made, tracked in our own table -- nothing
+        else in the library is touched. A removal that fails leaves its row
+        alone so it is tried again rather than forgotten while still there.
+        """
+        stale = db.carriers_beyond_newest(self._db.conn, KEEP_CARRIERS)
+        if not stale:
+            return
+        current = self.settings
+        station = current["azuracast_station_id"]
+        for row in stale:
+            try:
+                response = self.client.delete(
+                    self._url(current, f"/api/station/{station}/file/{row['media_id']}"),
+                    headers=self._headers(current),
+                )
+                # Already gone is the outcome we wanted, not a failure.
+                if getattr(response, "status_code", 200) != 404:
+                    response.raise_for_status()
+            except httpx.HTTPError as exc:
+                log.warning("could not remove carrier %s: %s", row["media_id"], exc)
+                continue
+            db.forget_carrier(self._db.conn, row["key"])
+            log.debug("removed carrier %s", row["media_id"])
 
     def _create(self, metadata: Metadata, key: str) -> str | None:
         current = self.settings

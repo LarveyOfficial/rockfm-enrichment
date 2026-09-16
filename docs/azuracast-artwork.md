@@ -121,7 +121,7 @@ Note the album field stays empty, exactly as the filter predicts: `album` is not
 in `ALLOWED_ANNOTATIONS` either, and the carrier's album is not what
 `SongApiGenerator` reads for that field.
 
-### One record per song, not one shared record
+### One record per airing, not one shared record
 
 Both were on the table. The shared record -- one placeholder rewritten at every
 boundary -- was built first because it is less work, and it was wrong:
@@ -141,12 +141,15 @@ raw = "\x00".join((artist, title, album, str(round(seconds))))
 key = hashlib.sha256(raw.encode()).hexdigest()[:20]
 ```
 
-A station's rotation converges quickly, and a record is written exactly once:
-create, name, set the length, upload the art. Every later airing is a single
-call naming something already correct, and nothing is ever edited in place.
-Keying on the length means an edited airing gets its own record rather than
-rewriting the one the full version uses.
+Including the start time makes it per *airing*: the same track played twice is
+two records. A station cuts tracks differently each time so the length often
+differs anyway, but the reason holds even when it does not -- pointing AzuraCast
+at a record it has already seen reads as the same track still playing, and the
+elapsed time never returns to zero. Keying on the start rather than counting
+keeps the answer the same if we ask twice, so a restart mid-song finds the
+record it already uploaded instead of making a second.
 
+A record is written exactly once:
 The silence is rendered at the song's real length (capped at ten minutes, for
 programmes) so AzuraCast can read the duration off the audio and not only from
 the field, which it may recompute from the file later.

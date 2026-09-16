@@ -93,8 +93,8 @@ def test_a_span_that_does_not_move_forward_is_not_a_length(end):
 
 
 class _Reply:
-    def __init__(self, payload=None, content=b""):
-        self._payload, self.content = payload, content
+    def __init__(self, payload=None, content=b"", status_code=200):
+        self._payload, self.content, self.status_code = payload, content, status_code
 
     def raise_for_status(self):
         return None
@@ -109,6 +109,8 @@ class _Api:
     def __init__(self, media_id="77"):
         self.media_id, self.calls = media_id, []
         self._made = 0
+        self.delete_status = 200
+        self.delete_raises = False
 
     def post(self, url, **kw):
         self.calls.append(("post", url, kw))
@@ -124,6 +126,12 @@ class _Api:
     def get(self, url, **kw):
         self.calls.append(("get", url, kw))
         return _Reply(content=b"remote-bytes")
+
+    def delete(self, url, **kw):
+        self.calls.append(("delete", url, kw))
+        if self.delete_raises:
+            raise httpx.HTTPError("connection reset")
+        return _Reply({}, status_code=self.delete_status)
 
     def close(self):
         return None
@@ -172,11 +180,11 @@ def test_a_song_gets_a_record_of_its_own(tmp_path):
     assert edits(api)[0]["length"] == pytest.approx(204.108)
 
 
-def test_the_same_song_reuses_its_record_untouched(tmp_path):
-    """The bug that prompted this: a record edited under AzuraCast's feet.
+def test_asking_twice_for_one_airing_does_not_make_two_records(tmp_path):
+    """We poll every two seconds; a song holds for minutes.
 
-    A rewritten record left the elapsed time never resetting, because a
-    constant id is part of how AzuraCast decides the song has changed.
+    Also what makes a restart mid-song safe: the key is derived, not counted,
+    so the second ask finds the record the first one uploaded.
     """
     carrier, api, _ = _carrier(tmp_path)
     first = carrier.record_for(_meta())
@@ -184,6 +192,21 @@ def test_the_same_song_reuses_its_record_untouched(tmp_path):
 
     assert carrier.record_for(_meta()) == first
     assert len(api.calls) == settled, "touched AzuraCast again for a record it already had"
+
+
+def test_the_same_song_played_again_gets_a_new_record(tmp_path):
+    """Every airing is its own record, even when nothing about the song changed.
+
+    A station cuts tracks differently each time, so a later airing may run to a
+    different length -- but the reason holds even when it does not. Pointing
+    AzuraCast at a record it has already seen reads as the same track still
+    playing, and the elapsed time never returns to zero.
+    """
+    carrier, api, _ = _carrier(tmp_path)
+    first = carrier.record_for(_meta())
+    later = carrier.record_for(_meta(start_ms=9_000_000, end_ms=9_204_108))
+    assert first != later
+    assert len(uploads(api)) == 2
 
 
 def test_two_songs_get_two_records(tmp_path):
@@ -219,14 +242,15 @@ def test_a_record_is_kept_across_restarts(tmp_path):
 def test_the_key_ignores_nothing_that_the_record_states():
     from rockfm.azuracast import Metadata, carrier_key
 
-    base = Metadata(title="t", artist="a", album="b", duration=200.0)
-    assert carrier_key(base) == carrier_key(Metadata(title="t", artist="a",
-                                                     album="b", duration=200.4))
+    base = Metadata(title="t", artist="a", album="b", duration=200.0, started_ms=5)
+    same = Metadata(title="t", artist="a", album="b", duration=200.4, started_ms=5)
+    assert carrier_key(base) == carrier_key(same), "the same airing asked twice"
     for different in (
-        Metadata(title="other", artist="a", album="b", duration=200.0),
-        Metadata(title="t", artist="other", album="b", duration=200.0),
-        Metadata(title="t", artist="a", album="other", duration=200.0),
-        Metadata(title="t", artist="a", album="b", duration=170.0),
+        Metadata(title="other", artist="a", album="b", duration=200.0, started_ms=5),
+        Metadata(title="t", artist="other", album="b", duration=200.0, started_ms=5),
+        Metadata(title="t", artist="a", album="other", duration=200.0, started_ms=5),
+        Metadata(title="t", artist="a", album="b", duration=170.0, started_ms=5),
+        Metadata(title="t", artist="a", album="b", duration=200.0, started_ms=6),
     ):
         assert carrier_key(base) != carrier_key(different)
 
@@ -381,6 +405,15 @@ def test_each_record_states_its_own_length(tmp_path):
     assert _lengths_put(api) == [pytest.approx(204.108), pytest.approx(100.0)]
 
 
+def test_every_airing_is_recorded_so_its_record_can_be_found_again(tmp_path):
+    """AzuraCast's library is otherwise the only place these records exist."""
+    from rockfm import db
+    carrier, _api, config = _carrier(tmp_path, _Library())
+    carrier.record_for(_meta())
+    carrier.record_for(_meta(start_ms=9_000_000, end_ms=9_204_108))
+    assert db.count_carriers(db.ThreadLocalDB(config.db_path).conn) == 2
+
+
 def test_a_song_of_unknown_length_says_nothing_about_it(tmp_path):
     carrier, api, _ = _carrier(tmp_path, _Library())
     carrier.record_for(metadata_for(SONG, "es"))
@@ -433,3 +466,73 @@ def test_an_hours_long_programme_is_not_rendered_in_full():
 
     heard = decode_bytes(_silent_mp3(4 * 3600.0), rate=8000)
     assert heard.size / 8000 == pytest.approx(MAX_RENDER_SECONDS, abs=1.0)
+
+
+# --- clearing up after ourselves ---------------------------------------------
+#
+# One record per airing fills a library at the rate songs are played, so each
+# new one takes the chance to remove those that are neither playing now nor the
+# one before. Only records we made: they are tracked in our own table, and
+# nothing else in the station's library is looked at.
+
+
+def _airings(carrier, how_many):
+    return [
+        carrier.record_for(_meta(start_ms=1_000_000 * n, end_ms=1_000_000 * n + 204_108))
+        for n in range(1, how_many + 1)
+    ]
+
+
+def deleted(api):
+    return [url.rsplit("/", 1)[-1] for m, url, _kw in api.calls if m == "delete"]
+
+
+def test_nothing_is_removed_while_there_are_only_two(tmp_path):
+    carrier, api, _ = _carrier(tmp_path)
+    _airings(carrier, 2)
+    assert deleted(api) == []
+
+
+def test_the_one_before_the_previous_is_removed(tmp_path):
+    """Keep what is playing and the one before it; let go of the rest."""
+    carrier, api, config = _carrier(tmp_path)
+    made = _airings(carrier, 3)
+
+    assert deleted(api) == [made[0]]
+    from rockfm import db
+    conn = db.ThreadLocalDB(config.db_path).conn
+    assert db.count_carriers(conn) == 2
+
+
+def test_the_library_does_not_grow_with_the_day(tmp_path):
+    carrier, api, config = _carrier(tmp_path)
+    made = _airings(carrier, 12)
+
+    from rockfm import db
+    assert db.count_carriers(db.ThreadLocalDB(config.db_path).conn) == 2
+    assert deleted(api) == made[:10], "removed the wrong records, or the wrong order"
+
+
+def test_a_removal_that_fails_is_tried_again(tmp_path):
+    """Forgetting a record we failed to delete would strand it in the library."""
+    carrier, api, config = _carrier(tmp_path)
+    api.delete_raises = True
+    _airings(carrier, 3)
+
+    from rockfm import db
+    conn = db.ThreadLocalDB(config.db_path).conn
+    assert db.count_carriers(conn) == 3, "forgot a record that is still there"
+
+    api.delete_raises = False
+    _airings(carrier, 4)
+    assert db.count_carriers(db.ThreadLocalDB(config.db_path).conn) == 2
+
+
+def test_a_record_already_gone_is_not_a_failure(tmp_path):
+    """404 is the outcome we wanted, however it came about."""
+    carrier, api, config = _carrier(tmp_path)
+    api.delete_status = 404
+    _airings(carrier, 3)
+
+    from rockfm import db
+    assert db.count_carriers(db.ThreadLocalDB(config.db_path).conn) == 2

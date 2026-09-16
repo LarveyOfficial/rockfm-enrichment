@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS song_meta (
     updated_ms  INTEGER NOT NULL
 );
 
+-- One row per airing we have given AzuraCast a media record for. Kept so the
+-- records we created can be found again later; AzuraCast's library is the only
+-- other place they exist, and nothing else marks them as ours.
+CREATE TABLE IF NOT EXISTS azuracast_carriers (
+    key        TEXT PRIMARY KEY,
+    media_id   TEXT NOT NULL,
+    start_ms   INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS azuracast_carriers_created
+    ON azuracast_carriers (created_ms);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -418,3 +430,54 @@ def previous_timeline(conn: sqlite3.Connection, before_ms: int) -> sqlite3.Row |
 
 def set_timeline_end(conn: sqlite3.Connection, item_id: int, end_ms: int) -> None:
     conn.execute("UPDATE timeline SET end_ms = ? WHERE id = ?", (end_ms, item_id))
+
+
+def remember_carrier(
+    conn: sqlite3.Connection, key: str, media_id: str, start_ms: int, created_ms: int
+) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO azuracast_carriers (key, media_id, start_ms, created_ms)"
+        " VALUES (?, ?, ?, ?)",
+        (key, media_id, start_ms, created_ms),
+    )
+    conn.commit()
+
+
+def carrier_media_id(conn: sqlite3.Connection, key: str) -> str | None:
+    """The record made for this airing, if one already was.
+
+    Looked up rather than assumed so a restart mid-song reuses the record it
+    already uploaded instead of making a second one for the same airing.
+    """
+    row = conn.execute(
+        "SELECT media_id FROM azuracast_carriers WHERE key = ?", (key,)
+    ).fetchone()
+    return row["media_id"] if row else None
+
+
+def carriers_created_before(conn: sqlite3.Connection, created_ms: int) -> list[sqlite3.Row]:
+    return list(
+        conn.execute(
+            "SELECT * FROM azuracast_carriers WHERE created_ms < ? ORDER BY created_ms",
+            (created_ms,),
+        )
+    )
+
+
+def carriers_beyond_newest(conn: sqlite3.Connection, keep: int) -> list[sqlite3.Row]:
+    """Every carrier except the newest `keep`, oldest first."""
+    return list(
+        conn.execute(
+            "SELECT * FROM azuracast_carriers ORDER BY created_ms DESC LIMIT -1 OFFSET ?",
+            (keep,),
+        )
+    )
+
+
+def forget_carrier(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM azuracast_carriers WHERE key = ?", (key,))
+    conn.commit()
+
+
+def count_carriers(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM azuracast_carriers").fetchone()[0]

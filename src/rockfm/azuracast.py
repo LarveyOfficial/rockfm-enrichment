@@ -25,9 +25,12 @@ official RockFM artwork regardless.
 
 from __future__ import annotations
 
+import base64
 import logging
+import shutil
 import signal
 import sqlite3
+import subprocess
 import threading
 from dataclasses import dataclass
 
@@ -42,6 +45,10 @@ from .timeshift import DelayController, playout_position
 log = logging.getLogger("rockfm.azuracast")
 
 POLL_SECONDS = 2.0
+# Where the artwork carrier lives in the station's library, and where its id is
+# remembered so it is only ever created once.
+CARRIER_PATH = "rockfm/nowplaying-artwork.mp3"
+MEDIA_ID_KEY = "azuracast_media_id"
 RESTART_DELAY = 5.0
 
 
@@ -119,15 +126,21 @@ class MetadataClient:
     def _url(self, current: dict, path: str) -> str:
         return f"{current['azuracast_base_url'].rstrip('/')}{path}"
 
-    def push(self, metadata: Metadata) -> bool:
+    def push(self, metadata: Metadata, media_id: int | str | None = None) -> bool:
         current = self.settings
         if not self.configured:
             return False
         path = f"/api/station/{current['azuracast_station_id']}/nowplaying/update"
+        params = metadata.as_params()
+        if media_id is not None:
+            # The one way artwork reaches AzuraCast. `art` is filtered out of the
+            # annotation before it is built; `media_id` is not, and a now-playing
+            # row carrying one is a StationMedia, whose art we control.
+            params["media_id"] = str(media_id)
         try:
             response = self.client.post(
                 self._url(current, path),
-                params=metadata.as_params(),
+                params=params,
                 headers={"X-API-Key": current["azuracast_api_key"]},
             )
             response.raise_for_status()
@@ -179,6 +192,140 @@ class MetadataClient:
         self.client.close()
 
 
+class MediaCarrier:
+    """A media record in AzuraCast's library that carries our artwork.
+
+    AzuraCast will not accept artwork for now-playing: `art` is dropped from the
+    Liquidsoap annotation before it is built. What it will accept is `media_id`,
+    and a now-playing row that has one is a StationMedia -- whose art comes from
+    the library, which we can write to.
+
+    So one record is kept, never played, purely as somewhere to put the picture.
+    Each time the song changes its art, title and artist are rewritten and the
+    metadata push points at it.
+    """
+
+    def __init__(self, config: Config, database: db.ThreadLocalDB, timeout: float = 30.0) -> None:
+        self.config = config
+        self._db = database
+        self.client = httpx.Client(timeout=timeout, follow_redirects=True)
+        self._art_sent: str | None = None
+
+    @property
+    def settings(self) -> dict:
+        return settings.load(self._db.conn)
+
+    def close(self) -> None:
+        self.client.close()
+
+    def _headers(self, current: dict) -> dict[str, str]:
+        return {"X-API-Key": current["azuracast_api_key"]}
+
+    def _url(self, current: dict, path: str) -> str:
+        return f"{current['azuracast_base_url'].rstrip('/')}{path}"
+
+    def media_id(self) -> str | None:
+        """The carrier record, creating it the first time it is needed."""
+        stored = db.get_meta(self._db.conn, MEDIA_ID_KEY)
+        if stored:
+            return stored
+
+        current = self.settings
+        silence = _silent_mp3()
+        if silence is None:
+            return None
+        station = current["azuracast_station_id"]
+        try:
+            response = self.client.post(
+                self._url(current, f"/api/station/{station}/files"),
+                json={"path": CARRIER_PATH, "file": base64.b64encode(silence).decode()},
+                headers=self._headers(current),
+            )
+            response.raise_for_status()
+            created = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("could not create the artwork carrier: %s", exc)
+            return None
+
+        found = str(created.get("id") or "")
+        if not found:
+            log.warning("artwork carrier was created without an id: %s", created)
+            return None
+        db.set_meta(self._db.conn, MEDIA_ID_KEY, found)
+        log.info("created the artwork carrier as media %s", found)
+        return found
+
+    def artwork(self, metadata: Metadata) -> bytes | None:
+        """The image itself, from disk where we have it and the network otherwise."""
+        if not metadata.art:
+            return None
+        name = metadata.art.rsplit("/art/", 1)[-1]
+        local = self.config.art_dir / name
+        if "/art/" in metadata.art and local.is_file():
+            return local.read_bytes()
+        try:
+            response = self.client.get(metadata.art)
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPError as exc:
+            log.warning("could not read artwork %s: %s", metadata.art, exc)
+            return None
+
+    def publish(self, media_id: str, metadata: Metadata) -> bool:
+        """Put this song's picture and name on the carrier record."""
+        current = self.settings
+        station = current["azuracast_station_id"]
+
+        if metadata.art and metadata.art != self._art_sent:
+            image = self.artwork(metadata)
+            if image is not None:
+                try:
+                    response = self.client.post(
+                        self._url(current, f"/api/station/{station}/art/{media_id}"),
+                        files={"file": ("art.jpg", image, "image/jpeg")},
+                        headers=self._headers(current),
+                    )
+                    response.raise_for_status()
+                    self._art_sent = metadata.art
+                except httpx.HTTPError as exc:
+                    log.warning("artwork upload failed: %s", exc)
+
+        # With a media_id present AzuraCast takes the song from the record, so
+        # the record has to say what is playing.
+        body = {"title": metadata.title, "artist": metadata.artist}
+        if metadata.album:
+            body["album"] = metadata.album
+        try:
+            response = self.client.put(
+                self._url(current, f"/api/station/{station}/file/{media_id}"),
+                json=body,
+                headers=self._headers(current),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            log.warning("could not describe the artwork carrier: %s", exc)
+            return False
+        return True
+
+
+def _silent_mp3() -> bytes | None:
+    """A second of silence, to hang artwork from. Never played."""
+    if not shutil.which("ffmpeg"):
+        log.warning("ffmpeg is needed once to create the artwork carrier")
+        return None
+    try:
+        done = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "anullsrc=r=44100:cl=stereo", "-t", "1",
+             "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "-"],
+            capture_output=True, timeout=30, check=True,
+        )
+        return done.stdout or None
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning("could not render the carrier audio: %s", exc)
+        return None
+
+
 def station_metadata() -> Metadata:
     """What to leave on the station when we stop driving its metadata.
 
@@ -196,6 +343,7 @@ class MetadataBridge:
         self.config = config
         self._db = database
         self.client = MetadataClient(config, database)
+        self.carrier = MediaCarrier(config, database)
         self.delay = DelayController(config)
         self.stop_event = threading.Event()
         self._last: tuple | None = None
@@ -231,7 +379,15 @@ class MetadataBridge:
             current["public_url"],
             appearance.load(self._db.conn, current["display_language"]),
         )
-        if self.client.push(metadata):
+        # Artwork can only travel on a media record, so give the carrier this
+        # song's picture and name before pointing now-playing at it. If any of
+        # that fails the push still goes out; a song under the wrong picture
+        # beats no song at all.
+        media_id = self.carrier.media_id() if metadata.art else None
+        if media_id and not self.carrier.publish(media_id, metadata):
+            media_id = None
+
+        if self.client.push(metadata, media_id=media_id):
             self._last = key
             return True
         return False
@@ -245,6 +401,7 @@ class MetadataBridge:
                 log.warning("metadata tick failed: %s", exc)
             self.stop_event.wait(POLL_SECONDS)
         self.client.close()
+        self.carrier.close()
 
 
 def main() -> None:

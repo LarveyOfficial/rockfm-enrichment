@@ -48,3 +48,152 @@ def test_params_omit_empty_fields():
     assert "album" not in params
     assert "art" not in params
     assert params["title"] == "RockFM"
+
+
+# --- artwork rides on a media record ----------------------------------------
+
+
+class _Reply:
+    def __init__(self, payload=None, content=b""):
+        self._payload, self.content = payload, content
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _Api:
+    """Stands in for AzuraCast, recording what we asked of it."""
+
+    def __init__(self, media_id="77"):
+        self.media_id, self.calls = media_id, []
+
+    def post(self, url, **kw):
+        self.calls.append(("post", url, kw))
+        if "/files" in url:
+            return _Reply({"id": self.media_id})
+        return _Reply({})
+
+    def put(self, url, **kw):
+        self.calls.append(("put", url, kw))
+        return _Reply({})
+
+    def get(self, url, **kw):
+        self.calls.append(("get", url, kw))
+        return _Reply(content=b"remote-bytes")
+
+    def close(self):
+        return None
+
+
+def _carrier(tmp_path, api=None):
+    from rockfm import db, settings
+    from rockfm.azuracast import MediaCarrier
+    from rockfm.config import Config
+
+    config = Config(data_dir=tmp_path)
+    config.ensure_dirs()
+    database = db.ThreadLocalDB(config.db_path)
+    settings.save(database.conn, {
+        "azuracast_enabled": True,
+        "azuracast_base_url": "https://radio.example.com",
+        "azuracast_station_id": "4",
+        "azuracast_api_key": "key",
+    })
+    carrier = MediaCarrier(config, database)
+    carrier.client = api or _Api()
+    return carrier, carrier.client, config
+
+
+def test_the_carrier_record_is_created_once_and_remembered(tmp_path):
+    """Uploading a placeholder on every song change would be absurd."""
+    carrier, api, _ = _carrier(tmp_path)
+
+    first = carrier.media_id()
+    uploads = [c for c in api.calls if "/files" in c[1]]
+    assert first == "77" and len(uploads) == 1
+
+    assert carrier.media_id() == "77"
+    assert len([c for c in api.calls if "/files" in c[1]]) == 1, "uploaded twice"
+
+
+def test_our_own_artwork_is_read_from_disk_not_fetched(tmp_path):
+    from rockfm.azuracast import Metadata
+
+    carrier, api, config = _carrier(tmp_path)
+    (config.art_dir / "abc.jpg").write_bytes(b"local-bytes")
+
+    art = carrier.artwork(Metadata(title="t", artist="a",
+                                   art="http://host:6967/art/abc.jpg"))
+    assert art == b"local-bytes"
+    assert not [c for c in api.calls if c[0] == "get"], "went to the network for a local file"
+
+
+def test_artwork_we_do_not_hold_is_fetched(tmp_path):
+    from rockfm.azuracast import Metadata
+
+    carrier, api, _ = _carrier(tmp_path)
+    art = carrier.artwork(Metadata(title="t", artist="a",
+                                   art="https://www.rockfm.fm/programme.jpg"))
+    assert art == b"remote-bytes"
+    assert [c for c in api.calls if c[0] == "get"]
+
+
+def test_publishing_sets_the_picture_and_the_name(tmp_path):
+    from rockfm.azuracast import Metadata
+
+    carrier, api, config = _carrier(tmp_path)
+    (config.art_dir / "abc.jpg").write_bytes(b"local-bytes")
+    meta = Metadata(title="Denis", artist="Blondie", album="Plastic Letters",
+                    art="http://host:6967/art/abc.jpg")
+
+    assert carrier.publish("77", meta) is True
+
+    art_posts = [c for c in api.calls if "/art/77" in c[1]]
+    assert len(art_posts) == 1
+    assert art_posts[0][2]["files"]["file"][1] == b"local-bytes"
+
+    edits = [c for c in api.calls if c[0] == "put" and "/file/77" in c[1]]
+    assert len(edits) == 1
+    assert edits[0][2]["json"] == {"title": "Denis", "artist": "Blondie",
+                                   "album": "Plastic Letters"}
+
+
+def test_the_same_picture_is_not_uploaded_twice(tmp_path):
+    """A song holds for minutes and we poll every two seconds."""
+    from rockfm.azuracast import Metadata
+
+    carrier, api, config = _carrier(tmp_path)
+    (config.art_dir / "abc.jpg").write_bytes(b"local-bytes")
+    meta = Metadata(title="Denis", artist="Blondie",
+                    art="http://host:6967/art/abc.jpg")
+
+    carrier.publish("77", meta)
+    carrier.publish("77", meta)
+    assert len([c for c in api.calls if "/art/77" in c[1]]) == 1
+
+
+def test_the_push_names_the_media_record(tmp_path):
+    from rockfm import db, settings
+    from rockfm.azuracast import Metadata, MetadataClient
+    from rockfm.config import Config
+
+    config = Config(data_dir=tmp_path)
+    config.ensure_dirs()
+    database = db.ThreadLocalDB(config.db_path)
+    settings.save(database.conn, {
+        "azuracast_enabled": True,
+        "azuracast_base_url": "https://radio.example.com",
+        "azuracast_station_id": "4",
+        "azuracast_api_key": "key",
+    })
+    client = MetadataClient(config, database)
+    api = _Api()
+    client.client = api
+
+    assert client.push(Metadata(title="Denis", artist="Blondie"), media_id="77") is True
+    params = api.calls[-1][2]["params"]
+    assert params["media_id"] == "77"
+    assert params["title"] == "Denis"

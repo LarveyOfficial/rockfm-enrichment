@@ -233,3 +233,48 @@ def test_the_push_names_the_media_record(tmp_path):
     params = api.calls[-1][2]["params"]
     assert params["media_id"] == "77"
     assert params["title"] == "Denis"
+
+
+# --- the push waits for the audio to catch up --------------------------------
+
+
+def _bridge(tmp_path):
+    from rockfm import db, settings
+    from rockfm.azuracast import MetadataBridge
+    from rockfm.config import Config
+
+    config = Config(data_dir=tmp_path)
+    config.ensure_dirs()
+    database = db.ThreadLocalDB(config.db_path)
+    settings.save(database.conn, {
+        "azuracast_enabled": True,
+        "azuracast_base_url": "https://radio.example.com",
+        "azuracast_station_id": "4",
+        "azuracast_api_key": "key",
+    })
+    for start, end, title in ((0, 100_000, "Denis"), (100_000, 200_000, "Basket Case")):
+        db.upsert_timeline(database.conn, {
+            "start_ms": start, "end_ms": end, "kind": "cancion",
+            "title": title, "artist": "somebody",
+        }, 0)
+    database.conn.commit()
+    bridge = MetadataBridge(config, database)
+    bridge.playout_position = lambda: 150_000        # airing the second song
+    return bridge
+
+
+def test_without_a_measurement_the_bridge_uses_our_own_position(tmp_path):
+    assert _bridge(tmp_path).current()["title"] == "Basket Case"
+
+
+def test_the_push_steps_back_by_the_measured_delay(tmp_path):
+    """AzuraCast is still on the previous song, so that is what to announce."""
+    bridge = _bridge(tmp_path)
+    bridge.lag.record(60_000)
+    assert bridge.current()["title"] == "Denis"
+
+
+def test_a_small_delay_does_not_overshoot_the_song(tmp_path):
+    bridge = _bridge(tmp_path)
+    bridge.lag.record(20_000)
+    assert bridge.current()["title"] == "Basket Case"

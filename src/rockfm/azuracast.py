@@ -38,7 +38,9 @@ import httpx
 
 from . import appearance, db, labels, settings
 from . import strings_es as S
+from .buffer import BufferReader
 from .config import Config
+from .lag import LagProbe
 from .rockfm_api import STATION_ART
 from .timeshift import DelayController, playout_position
 
@@ -132,10 +134,36 @@ class MetadataClient:
         self.config = config
         self._db = database
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
+        self._listen_url = ""
 
     @property
     def settings(self) -> dict:
         return settings.load(self._db.conn)
+
+    def listen_url(self) -> str:
+        """The mount AzuraCast broadcasts on, asked of AzuraCast itself.
+
+        Nothing to configure and nothing to keep in step: the station already
+        knows its own mount, so the lag probe has something to listen to the
+        moment the station is up.
+        """
+        if self._listen_url:
+            return self._listen_url
+        if not self.configured:
+            return ""
+        current = self.settings
+        path = f"/api/nowplaying/{current['azuracast_station_id']}"
+        try:
+            response = self.client.get(self._url(current, path))
+            response.raise_for_status()
+            found = response.json().get("station", {}).get("listen_url", "")
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.debug("could not learn the station's mount: %s", exc)
+            return ""
+        if found:
+            self._listen_url = found
+            log.info("listening to %s to time the broadcast", found)
+        return found
 
     @property
     def configured(self) -> bool:
@@ -360,6 +388,21 @@ def station_metadata() -> Metadata:
     return Metadata(title=S.STATION_NAME, artist="", art=STATION_ART)
 
 
+class _BufferView:
+    """Buffer access that works from whichever thread asks.
+
+    `BufferReader` holds a connection, and SQLite connections cannot cross
+    threads, so the reader is built per call against this thread's own.
+    """
+
+    def __init__(self, config: Config, database: db.ThreadLocalDB) -> None:
+        self.config = config
+        self._db = database
+
+    def read(self, start_ms: int, span_ms: int, rate: int):
+        return BufferReader(self._db.conn, self.config).read(start_ms, span_ms, rate=rate)
+
+
 class MetadataBridge:
     """Watches what is airing and pushes each change to AzuraCast."""
 
@@ -372,9 +415,22 @@ class MetadataBridge:
         self.stop_event = threading.Event()
         self._last: tuple | None = None
         self._was_enabled = False
+        self.lag = LagProbe(
+            _BufferView(config, database),
+            position=self.playout_position,
+            listen_url=self.client.listen_url,
+        )
+
+    def playout_position(self) -> int:
+        """The buffer instant going out of our stream this moment."""
+        return playout_position(self.config, self.delay.current)
 
     def current(self) -> sqlite3.Row | None:
-        position = playout_position(self.config, self.delay.current)
+        # What AzuraCast is broadcasting now left us a while ago -- HLS,
+        # Liquidsoap and Icecast each hold some of it. The push takes none of
+        # that path, so without stepping back by the measured delay the title
+        # would change well before the song does.
+        position = self.playout_position() - self.lag.lag_ms
         return db.timeline_at(self._db.conn, position)
 
     def tick(self) -> bool:
@@ -418,12 +474,15 @@ class MetadataBridge:
 
     def run(self) -> None:
         log.info("metadata bridge started")
+        timer = threading.Thread(target=self.lag.run, name="lag-probe", daemon=True)
+        timer.start()
         while not self.stop_event.is_set():
             try:
                 self.tick()
             except Exception as exc:
                 log.warning("metadata tick failed: %s", exc)
             self.stop_event.wait(POLL_SECONDS)
+        self.lag.stop()
         self.client.close()
         self.carrier.close()
 

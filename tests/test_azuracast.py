@@ -1,3 +1,5 @@
+import pytest
+
 from rockfm.azuracast import metadata_for
 
 SONG = {
@@ -48,6 +50,40 @@ def test_params_omit_empty_fields():
     assert "album" not in params
     assert "art" not in params
     assert params["title"] == "RockFM"
+
+
+# --- how long the song runs -------------------------------------------------
+#
+# AzuraCast timed every song at 0:01: with no duration of our own it fell back
+# to the carrier media record, which is one second of silence. `duration` is in
+# ALLOWED_ANNOTATIONS, so unlike `art` and `album` it does get through.
+
+TIMED = dict(SONG, start_ms=1_000_000, end_ms=1_204_108)
+
+
+def test_a_song_carries_its_length():
+    assert metadata_for(TIMED, "es").duration == pytest.approx(204.108)
+
+
+def test_the_length_is_sent_to_azuracast():
+    assert metadata_for(TIMED, "es").as_params()["duration"] == "204.108"
+
+
+def test_a_programme_is_timed_too():
+    """Shows run for hours; 0:01 looked just as wrong there."""
+    timed_show = dict(SHOW, start_ms=0, end_ms=3_600_000)
+    assert metadata_for(timed_show, "es").as_params()["duration"] == "3600.000"
+
+
+def test_a_row_with_no_span_sends_no_length():
+    """Better to leave it out than to claim a length we do not have."""
+    assert "duration" not in metadata_for(SONG, "es").as_params()
+
+
+@pytest.mark.parametrize("end", [1_000_000, 900_000])
+def test_a_span_that_does_not_move_forward_is_not_a_length(end):
+    row = dict(SONG, start_ms=1_000_000, end_ms=end)
+    assert metadata_for(row, "es").duration is None
 
 
 # --- artwork rides on a media record ----------------------------------------

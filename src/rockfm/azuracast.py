@@ -58,6 +58,7 @@ class Metadata:
     artist: str
     album: str | None = None
     art: str | None = None
+    duration: float | None = None
 
     def as_params(self) -> dict[str, str]:
         params = {"title": self.title, "artist": self.artist}
@@ -65,7 +66,24 @@ class Metadata:
             params["album"] = self.album
         if self.art:
             params["art"] = self.art
+        if self.duration:
+            # Unlike `art` and `album`, `duration` is in ALLOWED_ANNOTATIONS, so
+            # it survives the filter. Without it AzuraCast times the song by the
+            # carrier media record instead -- a second of silence, shown as 0:01.
+            params["duration"] = f"{self.duration:.3f}"
         return params
+
+
+def _span_seconds(item: dict) -> float | None:
+    """How long the timeline says this stretch runs, in seconds.
+
+    Rows built by hand (and the tests' fixtures) carry no span, so this is
+    allowed to come back empty rather than invent one.
+    """
+    start, end = item.get("start_ms"), item.get("end_ms")
+    if start is None or end is None or end <= start:
+        return None
+    return (end - start) / 1000.0
 
 
 def metadata_for(
@@ -92,8 +110,14 @@ def metadata_for(
             artist=item.get("artist") or "",
             album=item.get("album"),
             art=art,
+            duration=_span_seconds(item),
         )
-    return Metadata(title=primary, artist=secondary or S.STATION_NAME, art=art)
+    return Metadata(
+        title=primary,
+        artist=secondary or S.STATION_NAME,
+        art=art,
+        duration=_span_seconds(item),
+    )
 
 
 class MetadataClient:

@@ -349,20 +349,34 @@ def test_a_refusal_is_remembered_rather_than_retried_every_song(tmp_path):
     assert len(api.calls) > before
 
 
-def test_a_length_that_quietly_does_not_stick_is_noticed(tmp_path):
-    """A 200 that changes nothing looks exactly like success until you look."""
+def test_a_length_that_does_not_stick_is_reported_but_still_sent(tmp_path):
+    """The bug this replaces: one racy read switched the field off for good.
+
+    A 200 that changes nothing looks exactly like success until you look, so
+    looking is worth it -- but a single read is not evidence enough to stop
+    sending a field that costs nothing and is the only way the length can ever
+    arrive. Every song after the first lost its running time to that latch.
+    """
     carrier, api, _ = _carrier(tmp_path, _Library(keeps=False))
     carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    assert carrier._length_kept is False
     carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
-    assert len(_lengths_put(api)) == 1, "kept sending a length that never stuck"
+    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="A third"), "es"))
+    assert len(_lengths_put(api)) == 3, "stopped sending the length after reading it back"
 
 
-def test_a_length_that_sticks_is_trusted_from_then_on(tmp_path):
+def test_the_length_is_only_read_back_once(tmp_path):
+    """Worth one call to learn; not worth one per song."""
     carrier, api, _ = _carrier(tmp_path, _Library(keeps=True))
-    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
-    assert carrier._length_kept is True
-    carrier.publish("77", metadata_for(dict(TIMED_SONG, title="Another"), "es"))
-    assert len(_lengths_put(api)) == 2
+    for title in ("Denis", "Another", "A third"):
+        carrier.publish("77", metadata_for(dict(TIMED_SONG, title=title), "es"))
     reads = [1 for _m, url, _kw in api.calls if _m == "get" and "/file/" in url]
-    assert len(reads) == 1, "read the record back more than once"
+    assert len(reads) == 1
+    assert len(_lengths_put(api)) == 3
+
+
+def test_every_song_gets_its_own_length(tmp_path):
+    """Each boundary rewrites the carrier, so each length must go with it."""
+    carrier, api, _ = _carrier(tmp_path, _Library())
+    carrier.publish("77", metadata_for(TIMED_SONG, "es"))
+    carrier.publish("77", metadata_for(dict(SONG, start_ms=0, end_ms=100_000), "es"))
+    assert _lengths_put(api) == [pytest.approx(204.108), pytest.approx(100.0)]

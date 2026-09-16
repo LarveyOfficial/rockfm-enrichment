@@ -262,8 +262,12 @@ class MediaCarrier:
         self._db = database
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
         self._art_sent: str | None = None
-        # None until we have seen whether AzuraCast keeps a length we give it.
-        self._length_kept: bool | None = None
+        # Set only when AzuraCast rejects the field outright. A length that is
+        # accepted and quietly dropped is reported, never latched: the check is
+        # one racy read, and letting it switch the field off for good cost every
+        # song after the first its running time.
+        self._length_refused = False
+        self._length_checked = False
 
     @property
     def settings(self) -> dict:
@@ -352,20 +356,22 @@ class MediaCarrier:
         # And it takes the running time from the record too, not from the
         # `duration` we push -- which is why every song read 0:01, the carrier
         # being one second of silence.
-        if metadata.duration and self._length_kept is not False:
+        if metadata.duration and not self._length_refused:
             body["length"] = round(metadata.duration, 3)
 
         if not self._describe(current, station, media_id, body):
             if "length" not in body:
                 return False
-            # Refused outright: keep the artwork rather than lose both to it.
-            self._length_kept = False
+            # Refused outright, which a schema will keep doing. Drop it and keep
+            # the artwork: losing both to the running time would be a bad trade.
+            self._length_refused = True
             log.info("AzuraCast refused a track length; songs will read as the carrier's")
             body.pop("length")
             return self._describe(current, station, media_id, body)
 
-        if "length" in body and self._length_kept is None:
-            self._length_kept = self._length_took(current, station, media_id, body["length"])
+        if "length" in body and not self._length_checked:
+            self._length_checked = True
+            self._report_length(current, station, media_id, body["length"])
         return True
 
     def _describe(self, current: dict, station: str, media_id: str, body: dict) -> bool:
@@ -381,12 +387,13 @@ class MediaCarrier:
             return False
         return True
 
-    def _length_took(self, current: dict, station: str, media_id: str, asked: float) -> bool:
-        """Did the length stick? Asked once, because a quiet refusal looks the same.
+    def _report_length(self, current: dict, station: str, media_id: str, asked: float) -> None:
+        """Say once whether the length stuck. Diagnostic only -- never a switch.
 
-        AzuraCast may accept the field and then keep computing the length from
-        the file, which returns 200 and changes nothing. Reading the record back
-        once settles it, and the answer is remembered.
+        AzuraCast may accept the field and go on computing the length from the
+        file, which returns 200 and changes nothing. Worth knowing, but one
+        read is racy, so it is logged rather than acted on: the field costs
+        nothing to keep sending, and sending it is the only way it can work.
         """
         try:
             response = self.client.get(
@@ -397,15 +404,14 @@ class MediaCarrier:
             kept = float(response.json().get("length") or 0)
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             log.debug("could not read the carrier back: %s", exc)
-            return True                      # assume it took; try again next time
+            return
         if abs(kept - asked) < 1.0:
             log.info("AzuraCast keeps the track length we set (%.0fs)", kept)
-            return True
-        log.warning(
-            "AzuraCast kept %.0fs rather than the %.0fs we set; songs will show its length",
-            kept, asked,
-        )
-        return False
+        else:
+            log.warning(
+                "AzuraCast read back %.0fs rather than the %.0fs we set; still sending it",
+                kept, asked,
+            )
 
 
 def _silent_mp3() -> bytes | None:
